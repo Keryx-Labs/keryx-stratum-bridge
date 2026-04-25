@@ -1,10 +1,10 @@
-package kaspastratum
+package keryxstratum
 
 import (
 	"testing"
 
 	"github.com/kaspanet/kaspad/app/appmessage"
-	"github.com/onemorebsmith/kaspastratum/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
 )
 
 func TestPromValid(t *testing.T) {
@@ -12,7 +12,7 @@ func TestPromValid(t *testing.T) {
 	// is valid to write to here
 	ctx := gostratum.StratumContext{}
 
-	RecordShareFound(&ctx)
+	RecordShareFound(&ctx, 0.0)
 	RecordStaleShare(&ctx)
 	RecordDupeShare(&ctx)
 	RecordInvalidShare(&ctx)

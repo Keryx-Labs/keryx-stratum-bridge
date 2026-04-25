@@ -8,7 +8,7 @@ import (
 	"path"
 	"time"
 
-	"github.com/onemorebsmith/kaspastratum/src/kaspastratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxstratum"
 	"gopkg.in/yaml.v2"
 )
 
@@ -21,7 +21,7 @@ func main() {
 		log.Printf("config file not found: %s", err)
 		os.Exit(1)
 	}
-	cfg := kaspastratum.BridgeConfig{}
+	cfg := keryxstratum.BridgeConfig{}
 	if err := yaml.Unmarshal(rawCfg, &cfg); err != nil {
 		log.Printf("failed parsing config file: %s", err)
 		os.Exit(1)
@@ -29,7 +29,7 @@ func main() {
 
 	flag.StringVar(&cfg.StratumPort, "stratum", cfg.StratumPort, "stratum port to listen on, default `:5555`")
 	flag.BoolVar(&cfg.PrintStats, "stats", cfg.PrintStats, "true to show periodic stats to console, default `true`")
-	flag.StringVar(&cfg.RPCServer, "kaspa", cfg.RPCServer, "address of the kaspad node, default `localhost:16110`")
+	flag.StringVar(&cfg.RPCServer, "keryxd", cfg.RPCServer, "address of the keryxd node, default `localhost:22110`")
 	flag.DurationVar(&cfg.BlockWaitTime, "blockwait", cfg.BlockWaitTime, "time in ms to wait before manually requesting new block, default `500`")
 	flag.UintVar(&cfg.MinShareDiff, "mindiff", cfg.MinShareDiff, "minimum share difficulty to accept from miner(s), default `4`")
 	flag.UintVar(&cfg.ExtranonceSize, "extranonce", cfg.ExtranonceSize, "size in bytes of extranonce, default `0`")
@@ -42,12 +42,12 @@ func main() {
 		cfg.MinShareDiff = 4
 	}
 	if cfg.BlockWaitTime == 0 {
-		cfg.BlockWaitTime = 5 * time.Second // this should never happen due to kas 1s block times
+		cfg.BlockWaitTime = 5 * time.Second
 	}
 
 	log.Println("----------------------------------")
-	log.Printf("initializing bridge")
-	log.Printf("\tkaspad:          %s", cfg.RPCServer)
+	log.Printf("initializing keryx stratum bridge")
+	log.Printf("\tkeryxd:          %s", cfg.RPCServer)
 	log.Printf("\tstratum:         %s", cfg.StratumPort)
 	log.Printf("\tprom:            %s", cfg.PromPort)
 	log.Printf("\tstats:           %t", cfg.PrintStats)
@@ -58,7 +58,7 @@ func main() {
 	log.Printf("\thealth check:    %s", cfg.HealthCheckPort)
 	log.Println("----------------------------------")
 
-	if err := kaspastratum.ListenAndServe(cfg); err != nil {
+	if err := keryxstratum.ListenAndServe(cfg); err != nil {
 		log.Println(err)
 	}
 }

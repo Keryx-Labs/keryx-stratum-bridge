@@ -1,4 +1,4 @@
-module github.com/onemorebsmith/kaspastratum
+module github.com/keryx-labs/keryx-stratum-bridge
 
 go 1.18
 

@@ -1,21 +1,21 @@
 FROM golang:1.19.1 as builder
 
-LABEL org.opencontainers.image.description="Dockerized Kaspa Stratum Bridge"      
-LABEL org.opencontainers.image.authors="onemorebsmith"  
-LABEL org.opencontainers.image.source="https://github.com/onemorebsmith/kaspa-stratum-bridge"
-              
+LABEL org.opencontainers.image.description="Dockerized Keryx Stratum Bridge"
+LABEL org.opencontainers.image.authors="keryx-labs"
+LABEL org.opencontainers.image.source="https://github.com/keryx-labs/keryx-stratum-bridge"
+
 WORKDIR /go/src/app
 ADD go.mod .
 ADD go.sum .
 RUN go mod download
 
 ADD . .
-RUN go build -o /go/bin/app ./cmd/kaspabridge
+RUN go build -o /go/bin/app ./cmd/keryxbridge
 
 
 FROM gcr.io/distroless/base:nonroot
 COPY --from=builder /go/bin/app /
-COPY cmd/kaspabridge/config.yaml /
+COPY cmd/keryxbridge/config.yaml /
 
 WORKDIR /
 ENTRYPOINT ["/app"]

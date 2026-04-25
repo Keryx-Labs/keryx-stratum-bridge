@@ -1,4 +1,4 @@
-package kaspastratum
+package keryxstratum
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-colorable"
-	"github.com/onemorebsmith/kaspastratum/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -18,7 +18,7 @@ const minBlockWaitTime = 500 * time.Millisecond
 
 type BridgeConfig struct {
 	StratumPort     string        `yaml:"stratum_port"`
-	RPCServer       string        `yaml:"kaspad_address"`
+	RPCServer       string        `yaml:"keryxd_address"`
 	PromPort        string        `yaml:"prom_port"`
 	PrintStats      bool          `yaml:"print_stats"`
 	UseLogFile      bool          `yaml:"log_to_file"`
@@ -39,7 +39,6 @@ func configureZap(cfg BridgeConfig) (*zap.SugaredLogger, func()) {
 			zapcore.AddSync(colorable.NewColorableStdout()), zap.InfoLevel)).Sugar(), func() {}
 	}
 
-	// log file fun
 	logFile, err := os.OpenFile("bridge.log", os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0666)
 	if err != nil {
 		panic(err)
@@ -63,7 +62,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 	if blockWaitTime < minBlockWaitTime {
 		blockWaitTime = minBlockWaitTime
 	}
-	ksApi, err := NewKaspaAPI(cfg.RPCServer, blockWaitTime, logger)
+	ksApi, err := NewKeryxAPI(cfg.RPCServer, blockWaitTime, logger)
 	if err != nil {
 		return err
 	}
@@ -76,7 +75,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 		go http.ListenAndServe(cfg.HealthCheckPort, nil)
 	}
 
-	shareHandler := newShareHandler(ksApi.kaspad)
+	shareHandler := newShareHandler(ksApi.keryxd)
 	minDiff := cfg.MinShareDiff
 	if minDiff < 1 {
 		minDiff = 1
@@ -87,11 +86,10 @@ func ListenAndServe(cfg BridgeConfig) error {
 	}
 	clientHandler := newClientListener(logger, shareHandler, float64(minDiff), int8(extranonceSize))
 	handlers := gostratum.DefaultHandlers()
-	// override the submit handler with an actual useful handler
 	handlers[string(gostratum.StratumMethodSubmit)] =
 		func(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
 			if err := shareHandler.HandleSubmit(ctx, event); err != nil {
-				ctx.Logger.Sugar().Error(err) // sink error
+				ctx.Logger.Sugar().Error(err)
 			}
 			return nil
 		}

@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/kaspanet/kaspad/util"
 	"github.com/mattn/go-colorable"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -111,20 +110,14 @@ func SendExtranonce(ctx *StratumContext) {
 	}
 }
 
-var walletRegex = regexp.MustCompile("kaspa:[a-z0-9]+")
+var walletRegex = regexp.MustCompile("keryx:[a-z0-9]+")
 
 func CleanWallet(in string) (string, error) {
-	_, err := util.DecodeAddress(in, util.Bech32PrefixKaspa)
-	if err == nil {
-		return in, nil // good to go
+	if !strings.HasPrefix(in, "keryx:") {
+		return CleanWallet("keryx:" + in)
 	}
-	if !strings.HasPrefix(in, "kaspa:") {
-		return CleanWallet("kaspa:" + in)
+	if match := walletRegex.FindString(in); match != "" {
+		return match, nil
 	}
-
-	// has kaspa: prefix but other weirdness somewhere
-	if walletRegex.MatchString(in) {
-		return in[0:67], nil
-	}
-	return "", errors.New("unable to coerce wallet to valid kaspa address")
+	return "", errors.New("unable to coerce wallet to valid keryx address")
 }
