@@ -1,4 +1,4 @@
-package kaspastratum
+package keryxstratum
 
 import (
 	"math/big"
@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/kaspanet/kaspad/app/appmessage"
-	"github.com/onemorebsmith/kaspastratum/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
 )
 
 const maxjobs = 32
@@ -19,7 +19,7 @@ type MiningState struct {
 	initialized bool
 	useBigJob   bool
 	connectTime time.Time
-	stratumDiff *kaspaDiff
+	stratumDiff *keryxDiff
 }
 
 func MiningStateGenerator() any {

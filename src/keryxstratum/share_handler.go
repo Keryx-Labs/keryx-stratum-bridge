@@ -1,4 +1,4 @@
-package kaspastratum
+package keryxstratum
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ import (
 	"github.com/kaspanet/kaspad/domain/consensus/utils/consensushashing"
 	"github.com/kaspanet/kaspad/domain/consensus/utils/pow"
 	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
-	"github.com/onemorebsmith/kaspastratum/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
 	"github.com/pkg/errors"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -32,16 +32,16 @@ type WorkStats struct {
 }
 
 type shareHandler struct {
-	kaspa        *rpcclient.RPCClient
+	keryxd       *rpcclient.RPCClient
 	stats        map[string]*WorkStats
 	statsLock    sync.Mutex
 	overall      WorkStats
 	tipBlueScore uint64
 }
 
-func newShareHandler(kaspa *rpcclient.RPCClient) *shareHandler {
+func newShareHandler(keryxd *rpcclient.RPCClient) *shareHandler {
 	return &shareHandler{
-		kaspa:     kaspa,
+		keryxd:    keryxd,
 		stats:     map[string]*WorkStats{},
 		statsLock: sync.Mutex{},
 	}
@@ -54,25 +54,20 @@ func (sh *shareHandler) getCreateStats(ctx *gostratum.StratumContext) *WorkStats
 	if ctx.WorkerName != "" {
 		stats, found = sh.stats[ctx.WorkerName]
 	}
-	if !found { // no worker name, check by remote address
+	if !found {
 		stats, found = sh.stats[ctx.RemoteAddr]
 		if found {
-			// no worker name, but remote addr is there
-			// so replacet the remote addr with the worker names
 			delete(sh.stats, ctx.RemoteAddr)
 			stats.WorkerName = ctx.WorkerName
 			sh.stats[ctx.WorkerName] = stats
 		}
 	}
-	if !found { // legit doesn't exist, create it
+	if !found {
 		stats = &WorkStats{}
 		stats.LastShare = time.Now()
 		stats.WorkerName = ctx.RemoteAddr
 		stats.StartTime = time.Now()
 		sh.stats[ctx.RemoteAddr] = stats
-
-		// TODO: not sure this is the best place, nor whether we shouldn't be
-		// resetting on disconnect
 		InitWorkerCounters(ctx)
 	}
 
@@ -125,21 +120,18 @@ var (
 	ErrDupeShare  = fmt.Errorf("duplicate share")
 )
 
-// the max difference between tip blue score and job blue score that we'll accept
-// anything greater than this is considered a stale
 const workWindow = 8
 
 func (sh *shareHandler) checkStales(ctx *gostratum.StratumContext, si *submitInfo) error {
 	tip := sh.tipBlueScore
 	if si.block.Header.BlueScore > tip {
 		sh.tipBlueScore = si.block.Header.BlueScore
-		return nil // can't be
+		return nil
 	}
 	if tip-si.block.Header.BlueScore > workWindow {
 		RecordStaleShare(ctx)
 		return errors.Wrapf(ErrStaleShare, "blueScore %d vs %d", si.block.Header.BlueScore, tip)
 	}
-	// TODO (bs): dupe share tracking
 	return nil
 }
 
@@ -149,8 +141,6 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 		return err
 	}
 
-	// add extranonce to noncestr if enabled and submitted nonce is shorter than
-	// expected (16 - <extranonce length> characters)
 	if ctx.Extranonce != "" {
 		extranonce2Len := 16 - len(ctx.Extranonce)
 		if len(submitInfo.noncestr) <= extranonce2Len {
@@ -158,7 +148,6 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 		}
 	}
 
-	//ctx.Logger.Debug(submitInfo.block.Header.BlueScore, " submit ", submitInfo.noncestr)
 	state := GetMiningState(ctx)
 	if state.useBigJob {
 		submitInfo.nonceVal, err = strconv.ParseUint(submitInfo.noncestr, 16, 64)
@@ -174,22 +163,6 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 		}
 	}
 	stats := sh.getCreateStats(ctx)
-	// if err := sh.checkStales(ctx, submitInfo); err != nil {
-	// 	if err == ErrDupeShare {
-	// 		ctx.Logger.Info("dupe share "+submitInfo.noncestr, ctx.WorkerName, ctx.WalletAddr)
-	// 		atomic.AddInt64(&stats.StaleShares, 1)
-	// 		RecordDupeShare(ctx)
-	// 		return ctx.ReplyDupeShare(event.Id)
-	// 	} else if errors.Is(err, ErrStaleShare) {
-	// 		ctx.Logger.Info(err.Error(), ctx.WorkerName, ctx.WalletAddr)
-	// 		atomic.AddInt64(&stats.StaleShares, 1)
-	// 		RecordStaleShare(ctx)
-	// 		return ctx.ReplyStaleShare(event.Id)
-	// 	}
-	// 	// unknown error somehow
-	// 	ctx.Logger.Error("unknown error during check stales: ", err.Error())
-	// 	return ctx.ReplyBadShare(event.Id)
-	// }
 
 	converted, err := appmessage.RPCBlockToDomainBlock(submitInfo.block)
 	if err != nil {
@@ -200,18 +173,11 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	powState := pow.NewState(mutableHeader)
 	powValue := powState.CalculateProofOfWorkValue()
 
-	// The block hash must be less or equal than the claimed target.
 	if powValue.Cmp(&powState.Target) <= 0 {
 		if err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id); err != nil {
 			return err
 		}
 	}
-	// remove for now until I can figure it out. No harm here as we're not
-	// } else if powValue.Cmp(state.stratumDiff.targetValue) >= 0 {
-	// 	ctx.Logger.Warn("weak block")
-	// 	RecordWeakShare(ctx)
-	// 	return ctx.ReplyLowDiffShare(event.Id)
-	// }
 
 	stats.SharesFound.Add(1)
 	stats.SharesDiff.Add(state.stratumDiff.hashValue)
@@ -233,16 +199,13 @@ func (sh *shareHandler) submit(ctx *gostratum.StratumContext,
 		Header:       mutable.ToImmutable(),
 		Transactions: block.Transactions,
 	}
-	_, err := sh.kaspa.SubmitBlock(block)
+	_, err := sh.keryxd.SubmitBlock(block)
 	blockhash := consensushashing.BlockHash(block)
-	// print after the submit to get it submitted faster
 	ctx.Logger.Info(fmt.Sprintf("Submitted block %s", blockhash))
 
 	if err != nil {
-		// :'(
 		if strings.Contains(err.Error(), "ErrDuplicateBlock") {
 			ctx.Logger.Warn("block rejected, stale")
-			// stale
 			sh.getCreateStats(ctx).StaleShares.Add(1)
 			sh.overall.StaleShares.Add(1)
 			RecordStaleShare(ctx)
@@ -256,22 +219,18 @@ func (sh *shareHandler) submit(ctx *gostratum.StratumContext,
 		}
 	}
 
-	// :)
 	ctx.Logger.Info(fmt.Sprintf("block accepted %s", blockhash))
 	stats := sh.getCreateStats(ctx)
 	stats.BlocksFound.Add(1)
 	sh.overall.BlocksFound.Add(1)
 	RecordBlockFound(ctx, block.Header.Nonce(), block.Header.BlueScore(), blockhash.String())
 
-	// nil return allows HandleSubmit to record share (blocks are shares too!) and
-	// handle the response to the client
 	return nil
 }
 
 func (sh *shareHandler) startStatsThread() error {
 	start := time.Now()
 	for {
-		// console formatting is terrible. Good luck whever touches anything
 		time.Sleep(10 * time.Second)
 		sh.statsLock.Lock()
 		str := "\n===============================================================================\n"
@@ -282,19 +241,19 @@ func (sh *shareHandler) startStatsThread() error {
 		for _, v := range sh.stats {
 			rate := GetAverageHashrateGHs(v)
 			totalRate += rate
-			rateStr := fmt.Sprintf("%0.2fGH/s", rate) // todo, fix units
+			rateStr := fmt.Sprintf("%0.2fGH/s", rate)
 			ratioStr := fmt.Sprintf("%d/%d/%d", v.SharesFound.Load(), v.StaleShares.Load(), v.InvalidShares.Load())
 			lines = append(lines, fmt.Sprintf(" %-15s| %14.14s | %14.14s | %12d | %11s",
 				v.WorkerName, rateStr, ratioStr, v.BlocksFound.Load(), time.Since(v.StartTime).Round(time.Second)))
 		}
 		sort.Strings(lines)
 		str += strings.Join(lines, "\n")
-		rateStr := fmt.Sprintf("%0.2fGH/s", totalRate) // todo, fix units
+		rateStr := fmt.Sprintf("%0.2fGH/s", totalRate)
 		ratioStr := fmt.Sprintf("%d/%d/%d", sh.overall.SharesFound.Load(), sh.overall.StaleShares.Load(), sh.overall.InvalidShares.Load())
 		str += "\n-------------------------------------------------------------------------------\n"
 		str += fmt.Sprintf("                | %14.14s | %14.14s | %12d | %11s",
 			rateStr, ratioStr, sh.overall.BlocksFound.Load(), time.Since(start).Round(time.Second))
-		str += "\n========================================================== ks_bridge_" + version + " ===\n"
+		str += "\n========================================================== keryx_bridge_" + version + " ===\n"
 		sh.statsLock.Unlock()
 		log.Println(str)
 	}

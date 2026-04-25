@@ -1,4 +1,4 @@
-package kaspastratum
+package keryxstratum
 
 import (
 	"bytes"
@@ -21,19 +21,19 @@ var (
 )
 
 // Basically three different ways of representing difficulty, each used on
-// different occasions.  All 3 are updated when the stratum diff is set via 
+// different occasions.  All 3 are updated when the stratum diff is set via
 // the setDiffValue method
-type kaspaDiff struct {
+type keryxDiff struct {
 	hashValue   float64  // previously known as shareValue
 	diffValue   float64  // previously known as fixedDifficulty
-	targetValue *big.Int // previously know as fixedDifficultyBI
+	targetValue *big.Int // previously known as fixedDifficultyBI
 }
 
-func newKaspaDiff() *kaspaDiff {
-	return &kaspaDiff{}
+func newKeryxDiff() *keryxDiff {
+	return &keryxDiff{}
 }
 
-func (k *kaspaDiff) setDiffValue(diff float64) {
+func (k *keryxDiff) setDiffValue(diff float64) {
 	k.diffValue = diff
 	k.targetValue = DiffToTarget(diff)
 	k.hashValue = DiffToHash(diff)
@@ -71,7 +71,6 @@ func SerializeBlockHeader(template *appmessage.RPCBlock) ([]byte, error) {
 	writeHexString(hasher, template.Header.AcceptedIDMerkleRoot)
 	writeHexString(hasher, template.Header.UTXOCommitment)
 
-	// pack the rest of the header at once
 	data := struct {
 		TS        uint64
 		Bits      uint32
@@ -107,7 +106,6 @@ func SerializeBlockHeader(template *appmessage.RPCBlock) ([]byte, error) {
 	writeHexString(hasher, template.Header.PruningPoint)
 
 	final := hasher.Sum(nil)
-	//log.Println(final)
 	return final, nil
 }
 
@@ -161,7 +159,6 @@ func CalculateTarget(bits uint64) big.Int {
 		exponent = 8 * ((bits >> 24) - 3)
 	}
 
-	// actual final diff (mant << exp)
 	diff := big.Int{}
 	diff.SetUint64(mantissa)
 	diff.Lsh(&diff, uint(exponent))
@@ -170,7 +167,6 @@ func CalculateTarget(bits uint64) big.Int {
 }
 
 func BigDiffToLittle(diff *big.Int) float64 {
-	// this is constant
 	numerator := &big.Int{}
 	numerator.SetUint64(2)
 	numerator.Lsh(numerator, 254)
