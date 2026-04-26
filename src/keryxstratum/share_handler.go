@@ -12,7 +12,6 @@ import (
 	"github.com/kaspanet/kaspad/app/appmessage"
 	"github.com/kaspanet/kaspad/domain/consensus/model/externalapi"
 	"github.com/kaspanet/kaspad/domain/consensus/utils/consensushashing"
-	"github.com/kaspanet/kaspad/domain/consensus/utils/pow"
 	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
 	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
 	"github.com/pkg/errors"
@@ -170,10 +169,20 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	}
 	mutableHeader := converted.Header.ToMutable()
 	mutableHeader.SetNonce(submitInfo.nonceVal)
-	powState := pow.NewState(mutableHeader)
-	powValue := powState.CalculateProofOfWorkValue()
 
-	if powValue.Cmp(&powState.Target) <= 0 {
+	// KeryxHash PoW verification — replaces Kaspa's pow.NewState which uses
+	// KHeavyHash (no wave_mix, no KERYX_MATRIX_SALT) and would silently drop
+	// every valid Keryx block found by stratum miners.
+	prePowHashBytes, err := SerializeBlockHeader(submitInfo.block)
+	if err != nil {
+		return fmt.Errorf("failed to serialize block header for PoW: %+v", err)
+	}
+	var prePowHash [32]byte
+	copy(prePowHash[:], prePowHashBytes)
+	powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal)
+	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
+
+	if powValue.Cmp(&target) <= 0 {
 		if err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id); err != nil {
 			return err
 		}
