@@ -2,6 +2,8 @@ package keryxstratum
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -131,8 +133,11 @@ func (s *KeryxApi) startBlockTemplateListener(ctx context.Context, blockReadyCb 
 
 func (ks *KeryxApi) GetBlockTemplate(
 	client *gostratum.StratumContext) (*appmessage.GetBlockTemplateResponseMessage, error) {
+	b := make([]byte, 8)
+	rand.Read(b)
+	opoiTag := "/ai:v1:" + hex.EncodeToString(b)
 	template, err := ks.keryxd.GetBlockTemplate(client.WalletAddr,
-		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s`, client.RemoteApp, version))
+		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s`, client.RemoteApp, version, opoiTag))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed fetching new block template from keryx")
 	}
