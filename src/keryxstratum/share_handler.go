@@ -202,9 +202,19 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal, uint64(submitInfo.block.Header.DAAScore))
 	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
 
-	// If the miner sent an OPoI tag, verify it matches tag_fixed(nonce).
-	// Old miners that don't send the tag are accepted without verification.
-	if submitInfo.opoiTag != "" && !verifyOPoITag(submitInfo.nonceVal, submitInfo.opoiTag) {
+	// Every share must carry an OPoI tag proving the miner ran tag_fixed(nonce).
+	// No tag = no inference = no mining.
+	if submitInfo.opoiTag == "" {
+		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
+		ctx.Logger.Warn("OPoI tag missing — no inference = no mining, rejecting share",
+			zap.String("nonce", submitInfo.noncestr),
+			zap.String("miner", ctx.WalletAddr))
+		sh.getCreateStats(ctx).InvalidShares.Add(1)
+		sh.overall.InvalidShares.Add(1)
+		RecordInvalidShare(ctx)
+		return ctx.ReplyBadShare(event.Id)
+	}
+	if !verifyOPoITag(submitInfo.nonceVal, submitInfo.opoiTag) {
 		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
 		ctx.Logger.Warn("OPoI tag mismatch — miner skipped inference",
 			zap.String("nonce", submitInfo.noncestr),
