@@ -79,6 +79,7 @@ type submitInfo struct {
 	state    *MiningState
 	noncestr string
 	nonceVal uint64
+	opoiTag  string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
 }
 
 func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) (*submitInfo, error) {
@@ -107,10 +108,19 @@ func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent)
 		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
 		return nil, fmt.Errorf("unexpected type for param 2: %+v", event.Params...)
 	}
+	// Optional 4th param: OPoI tag sent by keryx-miner v0.2.9+ (backward compatible)
+	var opoiTag string
+	if len(event.Params) >= 4 {
+		if tag, ok := event.Params[3].(string); ok {
+			opoiTag = tag
+		}
+	}
+
 	return &submitInfo{
 		state:    state,
 		block:    block,
 		noncestr: strings.Replace(noncestr, "0x", "", 1),
+		opoiTag:  opoiTag,
 	}, nil
 }
 
@@ -179,8 +189,22 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	}
 	var prePowHash [32]byte
 	copy(prePowHash[:], prePowHashBytes)
-	powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal)
+	powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal, uint64(submitInfo.block.Header.DAAScore))
 	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
+
+	// If the miner sent an OPoI tag, verify it matches tag_fixed(nonce).
+	// Old miners that don't send the tag are accepted without verification.
+	if submitInfo.opoiTag != "" && !verifyOPoITag(submitInfo.nonceVal, submitInfo.opoiTag) {
+		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
+		ctx.Logger.Warn("OPoI tag mismatch — miner skipped inference",
+			zap.String("nonce", submitInfo.noncestr),
+			zap.String("expected", tagFixed(submitInfo.nonceVal)),
+			zap.String("got", submitInfo.opoiTag))
+		sh.getCreateStats(ctx).InvalidShares.Add(1)
+		sh.overall.InvalidShares.Add(1)
+		RecordInvalidShare(ctx)
+		return ctx.ReplyBadShare(event.Id)
+	}
 
 	if powValue.Cmp(&target) <= 0 {
 		if err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id); err != nil {
