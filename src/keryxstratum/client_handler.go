@@ -74,6 +74,14 @@ func (c *clientListener) OnConnect(ctx *gostratum.StratumContext) {
 		time.Sleep(5 * time.Second)
 		c.shareHandler.getCreateStats(ctx)
 	}()
+	go func() {
+		// Wait for authorize to complete, then immediately challenge the new miner.
+		// No grace period: no inference = no mining.
+		time.Sleep(10 * time.Second)
+		if ctx.Connected() && ctx.WalletAddr != "" {
+			c.sendChallengeToClient(ctx)
+		}
+	}()
 }
 
 func (c *clientListener) OnDisconnect(ctx *gostratum.StratumContext) {
