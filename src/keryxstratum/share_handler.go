@@ -345,18 +345,20 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 	}
 
 	if resultText == "" {
-		ctx.Logger.Warn("OPoI challenge_response: empty result — model not loaded or inference failed",
+		ctx.Logger.Warn("OPoI challenge_response: empty result — no inference = no mining, disconnecting",
 			zap.String("model", modelIDHex[:8]),
 			zap.String("miner", ctx.WalletAddr))
-		state.challengePassed = false
-	} else {
-		ctx.Logger.Info("OPoI challenge_response: PASSED",
-			zap.String("model", modelIDHex[:8]),
-			zap.Int("result_len", len(resultText)),
-			zap.String("miner", ctx.WalletAddr))
-		state.challengePassed = true
-		RecordOPoIChallengePass(ctx)
+		state.activeChallengeNonce = ""
+		ctx.Disconnect()
+		return nil
 	}
+
+	ctx.Logger.Info("OPoI challenge_response: PASSED",
+		zap.String("model", modelIDHex[:8]),
+		zap.Int("result_len", len(resultText)),
+		zap.String("miner", ctx.WalletAddr))
+	state.challengePassed = true
 	state.activeChallengeNonce = ""
+	RecordOPoIChallengePass(ctx)
 	return nil
 }

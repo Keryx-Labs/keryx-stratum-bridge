@@ -227,9 +227,9 @@ func (c *clientListener) sendChallenges() {
 func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
 	state := GetMiningState(ctx)
 
-	// Skip if there is already an unanswered challenge pending for this miner.
 	state.challengeLock.Lock()
-	if state.activeChallengeNonce != "" && time.Since(state.challengeIssuedAt) < opOIChallengeInterval {
+	if state.activeChallengeNonce != "" {
+		// A challenge is already in flight; the deadline timer will kick if unanswered.
 		state.challengeLock.Unlock()
 		return
 	}
@@ -253,5 +253,20 @@ func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
 		Params:  []any{TinyLlamaModelIDHex, nonceHex},
 	}); err != nil {
 		ctx.Logger.Warn("OPoI challenge: failed to send to miner", zap.Error(err))
+		return
 	}
+
+	// Deadline timer: kick immediately if no response within the challenge window.
+	go func() {
+		time.Sleep(opOIChallengeInterval)
+		state.challengeLock.Lock()
+		unanswered := state.activeChallengeNonce == nonceHex
+		state.challengeLock.Unlock()
+		if unanswered {
+			ctx.Logger.Warn("OPoI challenge: deadline exceeded — no inference = no mining, disconnecting",
+				zap.String("nonce", nonceHex),
+				zap.String("miner", ctx.WalletAddr))
+			ctx.Disconnect()
+		}
+	}()
 }
