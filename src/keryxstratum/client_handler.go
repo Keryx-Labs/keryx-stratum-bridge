@@ -1,6 +1,9 @@
 package keryxstratum
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"regexp"
@@ -145,6 +148,15 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				jobParams = append(jobParams, template.Block.Header.Timestamp)
 			}
 
+			// If the block template carries a pending AiRequest, append daa_score and task JSON
+			// as params 4 and 5. The miner deserializes this as MiningNotifyWithTask.
+			if task := scanBlockForAiTask(template.Block); task != nil {
+				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob {
+					jobParams = append(jobParams, uint64(template.Block.Header.DAAScore))
+					jobParams = append(jobParams, taskJSON)
+				}
+			}
+
 			if err := client.Send(gostratum.JsonRpcEvent{
 				Version: "2.0",
 				Method:  "mining.notify",
@@ -180,5 +192,66 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				RecordBalances(balances)
 			}()
 		}
+	}
+}
+
+const opOIChallengeInterval = 6 * time.Minute
+
+// startChallengeLoop periodically sends OPoI capability challenges to all connected miners.
+// Each challenge asks the miner to run SLM inference on TinyLlama with a unique nonce.
+// This is the pool-side analogue of the gRPC inference_challenge mechanism used by solo miners.
+func (c *clientListener) startChallengeLoop(ctx context.Context) {
+	ticker := time.NewTicker(opOIChallengeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.sendChallenges()
+		}
+	}
+}
+
+func (c *clientListener) sendChallenges() {
+	c.clientLock.RLock()
+	defer c.clientLock.RUnlock()
+	for _, client := range c.clients {
+		if !client.Connected() || client.WalletAddr == "" {
+			continue
+		}
+		go c.sendChallengeToClient(client)
+	}
+}
+
+func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
+	state := GetMiningState(ctx)
+
+	// Skip if there is already an unanswered challenge pending for this miner.
+	state.challengeLock.Lock()
+	if state.activeChallengeNonce != "" && time.Since(state.challengeIssuedAt) < opOIChallengeInterval {
+		state.challengeLock.Unlock()
+		return
+	}
+	nonce := make([]byte, 8)
+	rand.Read(nonce) //nolint:errcheck — crypto/rand.Read never returns an error
+	nonceHex := hex.EncodeToString(nonce)
+	state.activeChallengeNonce = nonceHex
+	state.activeChallengeModel = TinyLlamaModelIDHex
+	state.challengeIssuedAt = time.Now()
+	state.challengePassed = false
+	state.challengeLock.Unlock()
+
+	ctx.Logger.Info("OPoI challenge: sending to pool miner",
+		zap.String("model", TinyLlamaModelIDHex[:8]),
+		zap.String("nonce", nonceHex),
+		zap.String("miner", ctx.WalletAddr))
+
+	if err := ctx.Send(gostratum.JsonRpcEvent{
+		Version: "2.0",
+		Method:  "mining.challenge",
+		Params:  []any{TinyLlamaModelIDHex, nonceHex},
+	}); err != nil {
+		ctx.Logger.Warn("OPoI challenge: failed to send to miner", zap.Error(err))
 	}
 }

@@ -93,6 +93,13 @@ func ListenAndServe(cfg BridgeConfig) error {
 			}
 			return nil
 		}
+	handlers["mining.challenge_response"] =
+		func(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
+			if err := shareHandler.HandleChallengeResponse(ctx, event); err != nil {
+				ctx.Logger.Sugar().Error(err)
+			}
+			return nil
+		}
 
 	stratumConfig := gostratum.StratumListenerConfig{
 		Port:           cfg.StratumPort,
@@ -107,6 +114,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 	ksApi.Start(ctx, func() {
 		clientHandler.NewBlockAvailable(ksApi)
 	})
+	go clientHandler.startChallengeLoop(ctx)
 
 	if cfg.PrintStats {
 		go shareHandler.startStatsThread()

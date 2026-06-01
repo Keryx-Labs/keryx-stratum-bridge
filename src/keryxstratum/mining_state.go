@@ -20,6 +20,13 @@ type MiningState struct {
 	useBigJob   bool
 	connectTime time.Time
 	stratumDiff *keryxDiff
+
+	// OPoI challenge state — guarded by challengeLock
+	challengeLock        sync.Mutex
+	activeChallengeNonce string
+	activeChallengeModel string
+	challengeIssuedAt    time.Time
+	challengePassed      bool
 }
 
 func MiningStateGenerator() any {

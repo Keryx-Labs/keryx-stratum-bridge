@@ -80,6 +80,7 @@ type submitInfo struct {
 	noncestr string
 	nonceVal uint64
 	opoiTag  string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
+	ipfsCID  string // optional: IPFS CID from keryx-miner v0.3.0+ (Phase 2 OPoI), empty = not provided
 }
 
 func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) (*submitInfo, error) {
@@ -116,11 +117,20 @@ func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent)
 		}
 	}
 
+	// Optional 5th param: IPFS CID sent by keryx-miner v0.3.0+ (Phase 2 OPoI)
+	var ipfsCID string
+	if len(event.Params) >= 5 {
+		if cid, ok := event.Params[4].(string); ok {
+			ipfsCID = cid
+		}
+	}
+
 	return &submitInfo{
 		state:    state,
 		block:    block,
 		noncestr: strings.Replace(noncestr, "0x", "", 1),
 		opoiTag:  opoiTag,
+		ipfsCID:  ipfsCID,
 	}, nil
 }
 
@@ -204,6 +214,14 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 		sh.overall.InvalidShares.Add(1)
 		RecordInvalidShare(ctx)
 		return ctx.ReplyBadShare(event.Id)
+	}
+
+	// Log CID from Phase 2 OPoI — miner has completed SLM inference and pinned the result on IPFS.
+	if submitInfo.ipfsCID != "" {
+		ctx.Logger.Info("OPoI inference result received",
+			zap.String("cid", submitInfo.ipfsCID),
+			zap.String("miner", ctx.WalletAddr))
+		RecordInferenceResult(ctx)
 	}
 
 	if powValue.Cmp(&target) <= 0 {
@@ -294,4 +312,51 @@ func (sh *shareHandler) startStatsThread() error {
 
 func GetAverageHashrateGHs(stats *WorkStats) float64 {
 	return stats.SharesDiff.Load() / time.Since(stats.StartTime).Seconds()
+}
+
+// HandleChallengeResponse processes a mining.challenge_response from a pool miner.
+// Params: [model_id_hex, result_text] — result_text is the SLM inference output.
+func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
+	if len(event.Params) < 2 {
+		ctx.Logger.Warn("OPoI challenge_response: malformed event, expected 2 params")
+		return nil
+	}
+	modelIDHex, _ := event.Params[0].(string)
+	resultText, _ := event.Params[1].(string)
+
+	state := GetMiningState(ctx)
+	state.challengeLock.Lock()
+	defer state.challengeLock.Unlock()
+
+	if state.activeChallengeNonce == "" {
+		ctx.Logger.Warn("OPoI challenge_response: no active challenge for this miner")
+		return nil
+	}
+	if modelIDHex != state.activeChallengeModel {
+		ctx.Logger.Warn("OPoI challenge_response: model mismatch",
+			zap.String("expected", state.activeChallengeModel[:8]),
+			zap.String("got", func() string {
+				if len(modelIDHex) >= 8 {
+					return modelIDHex[:8]
+				}
+				return modelIDHex
+			}()))
+		return nil
+	}
+
+	if resultText == "" {
+		ctx.Logger.Warn("OPoI challenge_response: empty result — model not loaded or inference failed",
+			zap.String("model", modelIDHex[:8]),
+			zap.String("miner", ctx.WalletAddr))
+		state.challengePassed = false
+	} else {
+		ctx.Logger.Info("OPoI challenge_response: PASSED",
+			zap.String("model", modelIDHex[:8]),
+			zap.Int("result_len", len(resultText)),
+			zap.String("miner", ctx.WalletAddr))
+		state.challengePassed = true
+		RecordOPoIChallengePass(ctx)
+	}
+	state.activeChallengeNonce = ""
+	return nil
 }

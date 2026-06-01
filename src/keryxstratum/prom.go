@@ -182,6 +182,24 @@ func RecordBalances(response *appmessage.GetBalancesByAddressesResponseMessage) 
 	}
 }
 
+var inferenceResultCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ks_opoi_inference_results",
+	Help: "Number of mining.submit calls that carried an IPFS CID (Phase 2 OPoI inference results)",
+}, workerLabels)
+
+var opOIChallengePassCounter = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ks_opoi_challenge_passes",
+	Help: "Number of successful OPoI capability challenges per worker",
+}, workerLabels)
+
+func RecordInferenceResult(worker *gostratum.StratumContext) {
+	inferenceResultCounter.With(commonLabels(worker)).Inc()
+}
+
+func RecordOPoIChallengePass(worker *gostratum.StratumContext) {
+	opOIChallengePassCounter.With(commonLabels(worker)).Inc()
+}
+
 var promInit sync.Once
 
 func StartPromServer(log *zap.SugaredLogger, port string) {
