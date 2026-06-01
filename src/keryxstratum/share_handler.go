@@ -216,12 +216,16 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 		return ctx.ReplyBadShare(event.Id)
 	}
 
-	// Log CID from Phase 2 OPoI — miner has completed SLM inference and pinned the result on IPFS.
+	// Miner included an IPFS CID — inference is complete. Publish the AiResponse TX on-chain.
 	if submitInfo.ipfsCID != "" {
 		ctx.Logger.Info("OPoI inference result received",
 			zap.String("cid", submitInfo.ipfsCID),
 			zap.String("miner", ctx.WalletAddr))
 		RecordInferenceResult(ctx)
+		if task := scanBlockForAiTask(submitInfo.block); task != nil {
+			go SubmitAiResponseTX(sh.keryxd, ctx.Logger, task.RequestHash,
+				uint64(submitInfo.block.Header.DAAScore), submitInfo.ipfsCID)
+		}
 	}
 
 	if powValue.Cmp(&target) <= 0 {
