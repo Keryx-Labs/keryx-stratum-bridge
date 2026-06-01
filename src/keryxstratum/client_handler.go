@@ -157,10 +157,10 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				jobParams = append(jobParams, template.Block.Header.Timestamp)
 			}
 
-			// If the block template carries a pending AiRequest, append daa_score and task JSON
-			// as params 4 and 5. The miner deserializes this as MiningNotifyWithTask.
+			// If the block template carries a pending AiRequest, dispatch it only to miners
+			// that have declared the required model via mining.declare_capabilities.
 			if task := scanBlockForAiTask(template.Block); task != nil {
-				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob {
+				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob && state.HasDeclaredModel(task.ModelIDHex) {
 					jobParams = append(jobParams, uint64(template.Block.Header.DAAScore))
 					jobParams = append(jobParams, taskJSON)
 				}

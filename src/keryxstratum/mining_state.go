@@ -57,3 +57,15 @@ func (ms *MiningState) GetJob(id int) (*appmessage.RPCBlock, bool) {
 	ms.JobLock.Unlock()
 	return job, exists
 }
+
+// HasDeclaredModel reports whether the miner declared the given model ID.
+func (ms *MiningState) HasDeclaredModel(modelIDHex string) bool {
+	ms.challengeLock.Lock()
+	defer ms.challengeLock.Unlock()
+	for _, m := range ms.declaredModels {
+		if m == modelIDHex {
+			return true
+		}
+	}
+	return false
+}
