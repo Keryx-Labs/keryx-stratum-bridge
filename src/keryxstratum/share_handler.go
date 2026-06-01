@@ -314,6 +314,30 @@ func GetAverageHashrateGHs(stats *WorkStats) float64 {
 	return stats.SharesDiff.Load() / time.Since(stats.StartTime).Seconds()
 }
 
+// HandleDeclareCapabilities stores the SLM model IDs declared by a pool miner.
+// The bridge uses these to challenge the miner with a model it actually has loaded.
+func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
+	var models []string
+	for _, p := range event.Params {
+		if id, ok := p.(string); ok && len(id) == 64 {
+			models = append(models, id)
+		}
+	}
+	if len(models) == 0 {
+		ctx.Logger.Warn("OPoI declare_capabilities: no valid model IDs received")
+		return nil
+	}
+	state := GetMiningState(ctx)
+	state.challengeLock.Lock()
+	state.declaredModels = models
+	state.challengeLock.Unlock()
+	ctx.Logger.Info("OPoI declare_capabilities: miner declared models",
+		zap.Int("count", len(models)),
+		zap.String("first", models[0][:8]),
+		zap.String("miner", ctx.WalletAddr))
+	return nil
+}
+
 // HandleChallengeResponse processes a mining.challenge_response from a pool miner.
 // Params: [model_id_hex, result_text] — result_text is the SLM inference output.
 func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {

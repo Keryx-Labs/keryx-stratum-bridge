@@ -23,6 +23,7 @@ type MiningState struct {
 
 	// OPoI challenge state — guarded by challengeLock
 	challengeLock        sync.Mutex
+	declaredModels       []string // model IDs declared by the miner via mining.declare_capabilities
 	activeChallengeNonce string
 	activeChallengeModel string
 	challengeIssuedAt    time.Time

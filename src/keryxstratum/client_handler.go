@@ -3,6 +3,7 @@ package keryxstratum
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -206,8 +207,8 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 const opOIChallengeInterval = 6 * time.Minute
 
 // startChallengeLoop periodically sends OPoI capability challenges to all connected miners.
-// Each challenge asks the miner to run SLM inference on TinyLlama with a unique nonce.
-// This is the pool-side analogue of the gRPC inference_challenge mechanism used by solo miners.
+// The challenge model is picked randomly from those declared by the miner via
+// mining.declare_capabilities. Miners with no declared models are disconnected immediately.
 func (c *clientListener) startChallengeLoop(ctx context.Context) {
 	ticker := time.NewTicker(opOIChallengeInterval)
 	defer ticker.Stop()
@@ -241,24 +242,37 @@ func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
 		state.challengeLock.Unlock()
 		return
 	}
+	// No declared models = no provable inference capability = no mining.
+	if len(state.declaredModels) == 0 {
+		state.challengeLock.Unlock()
+		ctx.Logger.Warn("OPoI: no models declared — no inference = no mining, disconnecting",
+			zap.String("miner", ctx.WalletAddr))
+		ctx.Disconnect()
+		return
+	}
+	// Challenge with a random model from those declared — proves the miner has what it claims.
+	var pick [8]byte
+	rand.Read(pick[:]) //nolint:errcheck
+	idx := binary.LittleEndian.Uint64(pick[:]) % uint64(len(state.declaredModels))
+	modelID := state.declaredModels[idx]
 	nonce := make([]byte, 8)
 	rand.Read(nonce) //nolint:errcheck — crypto/rand.Read never returns an error
 	nonceHex := hex.EncodeToString(nonce)
 	state.activeChallengeNonce = nonceHex
-	state.activeChallengeModel = TinyLlamaModelIDHex
+	state.activeChallengeModel = modelID
 	state.challengeIssuedAt = time.Now()
 	state.challengePassed = false
 	state.challengeLock.Unlock()
 
 	ctx.Logger.Info("OPoI challenge: sending to pool miner",
-		zap.String("model", TinyLlamaModelIDHex[:8]),
+		zap.String("model", modelID[:8]),
 		zap.String("nonce", nonceHex),
 		zap.String("miner", ctx.WalletAddr))
 
 	if err := ctx.Send(gostratum.JsonRpcEvent{
 		Version: "2.0",
 		Method:  "mining.challenge",
-		Params:  []any{TinyLlamaModelIDHex, nonceHex},
+		Params:  []any{modelID, nonceHex},
 	}); err != nil {
 		ctx.Logger.Warn("OPoI challenge: failed to send to miner", zap.Error(err))
 		return
