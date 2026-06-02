@@ -123,6 +123,49 @@ func (e *EscrowStore) PubKeyHex() string {
 	return e.pubKeyHex
 }
 
+// EscrowSPKHex returns the hex of the CSV-locked escrow script for this bridge's key.
+// The node creates a coinbase output with exactly this SPK for the 20% escrow cut when
+// the coinbase carries /escrow:<pubkey>. Used to detect our escrow outputs on accepted blocks.
+func (e *EscrowStore) EscrowSPKHex() string {
+	if e == nil || e.privKey == nil {
+		return ""
+	}
+	pub, err := schnorrPubKeyBytes(e.privKey)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(buildEscrowScript(pub))
+}
+
+// TrackCoinbaseEscrow registers a coinbase 20% escrow output for claiming after the
+// challenge window. Same claim path as inference escrows (IsInference=false → paid back
+// to the bridge's own P2PK). Deduplicated by (txid, outputIndex).
+func (e *EscrowStore) TrackCoinbaseEscrow(coinbaseTxID string, confirmDAA, amount uint64, outputIndex uint32) {
+	if e == nil || coinbaseTxID == "" || amount == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, en := range e.state.Entries {
+		if en.CoinbaseTxID == coinbaseTxID && en.OutputIndex == outputIndex {
+			return
+		}
+	}
+	e.state.Entries = append(e.state.Entries, &EscrowEntry{
+		CoinbaseTxID: coinbaseTxID,
+		ConfirmDAA:   confirmDAA,
+		AmountSompi:  amount,
+		OutputIndex:  outputIndex,
+		IsInference:  false,
+	})
+	e.saveStateLocked()
+	e.logger.Info("OPoI escrow: coinbase escrow tracked",
+		zap.String("tx_id", truncate(coinbaseTxID, 8)),
+		zap.Uint32("out", outputIndex),
+		zap.Uint64("amount", amount),
+		zap.Uint64("window_end", confirmDAA+challengeWindowBlocksEscrow))
+}
+
 // TrackInferenceEscrow registers an AiRequest.output[1] inference escrow.
 // Mirrors Rust EscrowWatcher.track_inference_escrow.
 func (e *EscrowStore) TrackInferenceEscrow(

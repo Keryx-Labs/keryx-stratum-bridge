@@ -76,6 +76,10 @@ func ListenAndServe(cfg BridgeConfig) error {
 	}
 
 	escrowStore := NewEscrowStore(ksApi.keryxd, logger.Desugar())
+	if escrowStore != nil {
+		// Embed this key in every coinbase so the 20% escrow cut is recoverable, not burned.
+		ksApi.escrowPubKey = escrowStore.PubKeyHex()
+	}
 
 	if cfg.HealthCheckPort != "" {
 		logger.Info("enabling health check on port " + cfg.HealthCheckPort)

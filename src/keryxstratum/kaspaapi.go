@@ -20,6 +20,10 @@ type KeryxApi struct {
 	logger        *zap.SugaredLogger
 	keryxd        *rpcclient.RPCClient
 	connected     bool
+	// escrowPubKey is the 64-hex Schnorr pubkey embedded in the coinbase as /escrow:<pk>.
+	// It tells the node to route the 20% escrow cut to a CSV-locked output (claimable after
+	// 36 000 blocks) instead of burning it. Empty = no escrow key available → cut is burned.
+	escrowPubKey string
 }
 
 func NewKeryxAPI(address string, blockWaitTime time.Duration, logger *zap.SugaredLogger) (*KeryxApi, error) {
@@ -141,7 +145,13 @@ func (ks *KeryxApi) GetBlockTemplate(
 	b := make([]byte, 8)
 	rand.Read(b)
 	nonce := binary.LittleEndian.Uint64(b)
-	opoiTag := fmt.Sprintf("/%016x/ai:v1:%s", nonce, tagFixed(nonce))
+	// Route the 20% escrow cut to the bridge's CSV-locked escrow (claimed after the
+	// challenge window) instead of letting the node burn it. Mirrors the solo miner.
+	escrowPart := ""
+	if ks.escrowPubKey != "" {
+		escrowPart = "/escrow:" + ks.escrowPubKey
+	}
+	opoiTag := fmt.Sprintf("%s/%016x/ai:v1:%s", escrowPart, nonce, tagFixed(nonce))
 	template, err := ks.keryxd.GetBlockTemplate(client.WalletAddr,
 		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s`, client.RemoteApp, version, opoiTag))
 	if err != nil {

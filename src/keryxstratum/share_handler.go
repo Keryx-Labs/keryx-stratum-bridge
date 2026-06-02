@@ -259,8 +259,15 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	}
 
 	if powValue.Cmp(&target) <= 0 {
-		if err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id); err != nil {
+		accepted, err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id)
+		if err != nil {
 			return err
+		}
+		// Block accepted: register the coinbase's 20% escrow outputs (CSV-locked to the
+		// bridge key) so they are claimed after the challenge window instead of stranded.
+		if accepted && len(converted.Transactions) > 0 {
+			coinbaseTxID := consensushashing.TransactionID(converted.Transactions[0]).String()
+			sh.trackCoinbaseEscrow(coinbaseTxID, uint64(submitInfo.block.Header.DAAScore), submitInfo.block)
 		}
 	}
 
@@ -276,8 +283,10 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	})
 }
 
+// submit pushes the block to keryxd. Returns (true, nil) when the node accepted it,
+// (false, replyErr) when it was stale or rejected.
 func (sh *shareHandler) submit(ctx *gostratum.StratumContext,
-	block *externalapi.DomainBlock, nonce uint64, eventId any) error {
+	block *externalapi.DomainBlock, nonce uint64, eventId any) (bool, error) {
 	mutable := block.Header.ToMutable()
 	mutable.SetNonce(nonce)
 	block = &externalapi.DomainBlock{
@@ -294,13 +303,13 @@ func (sh *shareHandler) submit(ctx *gostratum.StratumContext,
 			sh.getCreateStats(ctx).StaleShares.Add(1)
 			sh.overall.StaleShares.Add(1)
 			RecordStaleShare(ctx)
-			return ctx.ReplyStaleShare(eventId)
+			return false, ctx.ReplyStaleShare(eventId)
 		} else {
 			ctx.Logger.Warn("block rejected, unknown issue (probably bad pow", zap.Error(err))
 			sh.getCreateStats(ctx).InvalidShares.Add(1)
 			sh.overall.InvalidShares.Add(1)
 			RecordInvalidShare(ctx)
-			return ctx.ReplyBadShare(eventId)
+			return false, ctx.ReplyBadShare(eventId)
 		}
 	}
 
@@ -310,7 +319,25 @@ func (sh *shareHandler) submit(ctx *gostratum.StratumContext,
 	sh.overall.BlocksFound.Add(1)
 	RecordBlockFound(ctx, block.Header.Nonce(), block.Header.BlueScore(), blockhash.String())
 
-	return nil
+	return true, nil
+}
+
+// trackCoinbaseEscrow scans the accepted block's coinbase for the bridge's escrow
+// outputs (the node emits one 20% CSV-locked output per merged blue block) and registers
+// each for later claiming. No-op when escrow is disabled.
+func (sh *shareHandler) trackCoinbaseEscrow(coinbaseTxID string, confirmDAA uint64, block *appmessage.RPCBlock) {
+	if sh.escrowStore == nil || len(block.Transactions) == 0 {
+		return
+	}
+	escrowSPK := sh.escrowStore.EscrowSPKHex()
+	if escrowSPK == "" {
+		return
+	}
+	for i, out := range block.Transactions[0].Outputs {
+		if out.ScriptPublicKey != nil && strings.EqualFold(out.ScriptPublicKey.Script, escrowSPK) {
+			sh.escrowStore.TrackCoinbaseEscrow(coinbaseTxID, confirmDAA, out.Amount, uint32(i))
+		}
+	}
 }
 
 func (sh *shareHandler) startStatsThread() error {
