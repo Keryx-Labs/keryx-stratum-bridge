@@ -419,12 +419,13 @@ func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext,
 // HandleChallengeResponse processes a mining.challenge_response from a pool miner.
 // Params: [model_id_hex, result_text] — result_text is the SLM inference output.
 func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
-	if len(event.Params) < 2 {
-		ctx.Logger.Warn("OPoI challenge_response: malformed event, expected 2 params")
+	if len(event.Params) < 3 {
+		ctx.Logger.Warn("OPoI challenge_response: malformed event, expected 3 params")
 		return nil
 	}
 	modelIDHex, _ := event.Params[0].(string)
-	resultText, _ := event.Params[1].(string)
+	nonceHex, _ := event.Params[1].(string)
+	resultText, _ := event.Params[2].(string)
 
 	state := GetMiningState(ctx)
 	state.challengeLock.Lock()
@@ -443,6 +444,18 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 				}
 				return modelIDHex
 			}()))
+		return nil
+	}
+
+	// Anti-replay: the response must echo the exact nonce we issued. A mismatch means a
+	// stale or replayed answer — treat as no valid inference and disconnect.
+	if nonceHex != state.activeChallengeNonce {
+		ctx.Logger.Warn("OPoI challenge_response: nonce mismatch — replay/stale, disconnecting",
+			zap.String("expected", state.activeChallengeNonce),
+			zap.String("got", nonceHex),
+			zap.String("miner", ctx.WalletAddr))
+		state.activeChallengeNonce = ""
+		ctx.Disconnect()
 		return nil
 	}
 
