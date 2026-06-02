@@ -28,7 +28,12 @@ type BridgeConfig struct {
 	ExtranonceSize  uint          `yaml:"extranonce_size"`
 	// IPFS API endpoint used to verify miner-submitted CIDs before publishing AiResponse TXs.
 	// Defaults to http://127.0.0.1:5001 if empty.
-	IPFSAPIUrl      string        `yaml:"ipfs_api_url"`
+	IPFSAPIUrl string `yaml:"ipfs_api_url"`
+	// EscrowKeyFile is the path to the 64-char hex Schnorr private key file used to claim
+	// inference_reward escrows.  Defaults to "escrow.key" (same file as keryx-miner).
+	// Leave unset to use the default; set to "" to disable escrow claiming.
+	// The corresponding pubkey is logged at startup so requesters know which key to use.
+	EscrowKeyFile string `yaml:"escrow_key_file"`
 }
 
 func configureZap(cfg BridgeConfig) (*zap.SugaredLogger, func()) {
@@ -78,7 +83,8 @@ func ListenAndServe(cfg BridgeConfig) error {
 		go http.ListenAndServe(cfg.HealthCheckPort, nil)
 	}
 
-	shareHandler := newShareHandler(ksApi.keryxd, cfg.IPFSAPIUrl)
+	escrowStore := NewEscrowStore(ksApi.keryxd, logger.Desugar())
+	shareHandler := newShareHandler(ksApi.keryxd, cfg.IPFSAPIUrl, escrowStore)
 	minDiff := cfg.MinShareDiff
 	if minDiff < 1 {
 		minDiff = 1
@@ -87,7 +93,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 	if extranonceSize > 3 {
 		extranonceSize = 3
 	}
-	clientHandler := newClientListener(logger, shareHandler, float64(minDiff), int8(extranonceSize))
+	clientHandler := newClientListener(logger, shareHandler, float64(minDiff), int8(extranonceSize), escrowStore)
 	handlers := gostratum.DefaultHandlers()
 	handlers[string(gostratum.StratumMethodSubmit)] =
 		func(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
@@ -121,6 +127,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	escrowStore.Start(ctx)
 	ksApi.Start(ctx, func() {
 		clientHandler.NewBlockAvailable(ksApi)
 	})

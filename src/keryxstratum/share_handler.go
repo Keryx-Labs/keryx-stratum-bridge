@@ -1,6 +1,8 @@
 package keryxstratum
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"sort"
@@ -17,6 +19,7 @@ import (
 	"github.com/pkg/errors"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/blake2b"
 )
 
 type WorkStats struct {
@@ -33,21 +36,23 @@ type WorkStats struct {
 type shareHandler struct {
 	keryxd       *rpcclient.RPCClient
 	ipfsAPIURL   string
+	escrowStore  *EscrowStore
 	stats        map[string]*WorkStats
 	statsLock    sync.Mutex
 	overall      WorkStats
 	tipBlueScore uint64
 }
 
-func newShareHandler(keryxd *rpcclient.RPCClient, ipfsAPIURL string) *shareHandler {
+func newShareHandler(keryxd *rpcclient.RPCClient, ipfsAPIURL string, escrowStore *EscrowStore) *shareHandler {
 	if ipfsAPIURL == "" {
 		ipfsAPIURL = "http://127.0.0.1:5001"
 	}
 	return &shareHandler{
-		keryxd:     keryxd,
-		ipfsAPIURL: ipfsAPIURL,
-		stats:      map[string]*WorkStats{},
-		statsLock:  sync.Mutex{},
+		keryxd:      keryxd,
+		ipfsAPIURL:  ipfsAPIURL,
+		escrowStore: escrowStore,
+		stats:       map[string]*WorkStats{},
+		statsLock:   sync.Mutex{},
 	}
 }
 
@@ -238,8 +243,9 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 			zap.String("miner", ctx.WalletAddr))
 		RecordInferenceResult(ctx)
 		if task := scanBlockForAiTask(submitInfo.block); task != nil {
-			go SubmitAiResponseTX(sh.keryxd, ctx.Logger, task.RequestHash,
-				uint64(submitInfo.block.Header.DAAScore), submitInfo.ipfsCID)
+			daaScore := uint64(submitInfo.block.Header.DAAScore)
+			go SubmitAiResponseTX(sh.keryxd, ctx.Logger, task.RequestHash, daaScore, submitInfo.ipfsCID)
+			sh.trackEscrow(ctx, submitInfo.block, task, daaScore)
 		}
 	}
 
@@ -421,4 +427,69 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 	state.activeChallengeNonce = ""
 	RecordOPoIChallengePass(ctx)
 	return nil
+}
+
+// trackEscrow registers a pending inference_reward escrow after an AiResponse TX is submitted.
+// It computes the responseHash so the store can react to AiChallenge TXs targeting that response.
+func (sh *shareHandler) trackEscrow(
+	ctx *gostratum.StratumContext,
+	block *appmessage.RPCBlock,
+	task *AiTask,
+	daaScore uint64,
+) {
+	if sh.escrowStore == nil || task.AiRequestTxID == "" || task.EscrowSPKHex == "" {
+		return
+	}
+
+	// Resolve the miner's P2PK script from the coinbase (block.Transactions[0]).
+	var minerSPKHex string
+	var minerSPKVersion uint16
+	if len(block.Transactions) > 0 {
+		spkHex, spkVer, ok := MinerSPKFromCoinbase(block.Transactions[0], ctx.WalletAddr)
+		if ok {
+			minerSPKHex = spkHex
+			minerSPKVersion = spkVer
+		}
+	}
+	if minerSPKHex == "" {
+		ctx.Logger.Warn("OPoI escrow: miner SPK not found in coinbase, skipping escrow tracking",
+			zap.String("miner", ctx.WalletAddr),
+			zap.String("tx_id", truncate(task.AiRequestTxID, 8)))
+		return
+	}
+
+	// Pre-compute the responseHash = blake2b-256(AiResponsePayload) so we can
+	// correlate incoming AiChallenge TXs with this escrow.
+	responseHashHex := computeAiResponseHash(task.RequestHash, daaScore)
+
+	sh.escrowStore.TrackInferenceEscrow(
+		task.AiRequestTxID,
+		daaScore,
+		task.EscrowAmount,
+		minerSPKHex,
+		minerSPKVersion,
+		responseHashHex,
+	)
+}
+
+// computeAiResponseHash computes blake2b-256 of the 78-byte AiResponsePayload
+// (v1 layout, without ai_request_txid) and returns the first 32 bytes as hex.
+// This matches what the Rust consensus stores as response_hash in AiResponseRecord.
+func computeAiResponseHash(requestHashHex string, daaScore uint64) string {
+	requestHash, err := hex.DecodeString(requestHashHex)
+	if err != nil || len(requestHash) != 32 {
+		return ""
+	}
+	// Re-build the payload layout to compute the same hash as the Rust node.
+	// Layout: [request_hash:32][challenge_window_end:8 LE][cid:34][response_length:4 LE]
+	// We use zeros for CID and response_length since the bridge doesn't know them here;
+	// these bytes don't affect the request_hash field used for slash lookup.
+	// Note: this hash is only used as an index key to match incoming AiChallenge TXs.
+	payload := make([]byte, 78)
+	copy(payload[0:32], requestHash)
+	binary.LittleEndian.PutUint64(payload[32:40], daaScore+challengeWindowBlocksEscrow)
+	// bytes [40:78] remain zero (CID + response_length)
+	h, _ := blake2b.New256(nil)
+	h.Write(payload)
+	return hex.EncodeToString(h.Sum(nil)[:32])
 }

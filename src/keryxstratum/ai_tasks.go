@@ -10,7 +10,8 @@ import (
 	"github.com/kaspanet/kaspad/app/appmessage"
 )
 
-const subnetworkAiRequest = "0300000000000000000000000000000000000000"
+const subnetworkAiRequest   = "0300000000000000000000000000000000000000"
+const subnetworkAiChallenge = "0500000000000000000000000000000000000000"
 
 // TinyLlamaModelIDHex is the default challenge model (sha256(weights)).
 const TinyLlamaModelIDHex = "e64af368ec9351a5a4c0ec7ae47d42ada7f6b3f1a6e60fc73d0eb6ca2953645c"
@@ -31,6 +32,14 @@ type AiTask struct {
 	MaxTokens       uint32 `json:"max_tokens"`
 	InferenceReward uint64 `json:"inference_reward"`
 	RequestHash     string `json:"request_hash"`
+
+	// Escrow fields — populated when tx.VerboseData and tx.Outputs[1] are available.
+	// AiRequestTxID is the on-chain TX ID (outpoint for the escrow at index 1).
+	// Empty when VerboseData is absent; escrow claiming is skipped in that case.
+	AiRequestTxID    string `json:"-"`
+	EscrowSPKHex     string `json:"-"`
+	EscrowSPKVersion uint16 `json:"-"`
+	EscrowAmount     uint64 `json:"-"`
 }
 
 // extractAiTask decodes a SUBNETWORK_AI_REQUEST transaction payload into an AiTask.
@@ -76,7 +85,7 @@ func extractAiTask(tx *appmessage.RPCTransaction) *AiTask {
 		requestHash = hex.EncodeToString(h[:])
 	}
 
-	return &AiTask{
+	task := &AiTask{
 		StableID:        stableID,
 		ModelIDHex:      modelIDHex,
 		Prompt:          prompt,
@@ -84,6 +93,19 @@ func extractAiTask(tx *appmessage.RPCTransaction) *AiTask {
 		InferenceReward: inferenceReward,
 		RequestHash:     requestHash,
 	}
+
+	// Populate escrow fields when VerboseData carries the TX ID and output[1] exists.
+	if tx.VerboseData != nil && tx.VerboseData.TransactionID != "" && len(tx.Outputs) > 1 {
+		escrow := tx.Outputs[1]
+		if escrow != nil && escrow.ScriptPublicKey != nil {
+			task.AiRequestTxID    = tx.VerboseData.TransactionID
+			task.EscrowSPKHex     = escrow.ScriptPublicKey.Script
+			task.EscrowSPKVersion = escrow.ScriptPublicKey.Version
+			task.EscrowAmount     = escrow.Amount
+		}
+	}
+
+	return task
 }
 
 // scanBlockForAiTask returns the first pending AiRequest TX in a block template, or nil.
@@ -103,4 +125,22 @@ func aiTaskJSON(task *AiTask) string {
 		return ""
 	}
 	return string(b)
+}
+
+// scanBlockForAiChallengeResponseHashes returns the response_hash (hex) from every
+// SUBNETWORK_AI_CHALLENGE TX found in the block template.
+// Layout: [response_hash:32][challenger_deposit:8 LE][...]
+func scanBlockForAiChallengeResponseHashes(block *appmessage.RPCBlock) []string {
+	var out []string
+	for _, tx := range block.Transactions {
+		if !strings.EqualFold(tx.SubnetworkID, subnetworkAiChallenge) {
+			continue
+		}
+		payload, err := hex.DecodeString(tx.Payload)
+		if err != nil || len(payload) < 32 {
+			continue
+		}
+		out = append(out, hex.EncodeToString(payload[:32]))
+	}
+	return out
 }

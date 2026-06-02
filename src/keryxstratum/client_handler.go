@@ -25,6 +25,7 @@ const balanceDelay = time.Minute
 type clientListener struct {
 	logger           *zap.SugaredLogger
 	shareHandler     *shareHandler
+	escrowStore      *EscrowStore
 	clientLock       sync.RWMutex
 	clients          map[int32]*gostratum.StratumContext
 	lastBalanceCheck time.Time
@@ -35,7 +36,7 @@ type clientListener struct {
 	nextExtranonce   int32
 }
 
-func newClientListener(logger *zap.SugaredLogger, shareHandler *shareHandler, minShareDiff float64, extranonceSize int8) *clientListener {
+func newClientListener(logger *zap.SugaredLogger, shareHandler *shareHandler, minShareDiff float64, extranonceSize int8, escrowStore *EscrowStore) *clientListener {
 	return &clientListener{
 		logger:         logger,
 		minShareDiff:   minShareDiff,
@@ -44,6 +45,7 @@ func newClientListener(logger *zap.SugaredLogger, shareHandler *shareHandler, mi
 		nextExtranonce: 0,
 		clientLock:     sync.RWMutex{},
 		shareHandler:   shareHandler,
+		escrowStore:    escrowStore,
 		clients:        make(map[int32]*gostratum.StratumContext),
 	}
 }
@@ -123,6 +125,12 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 					client.Logger.Error(fmt.Sprintf("failed fetching new block template from keryx: %s", err))
 				}
 				return
+			}
+
+			// Update escrow store's DAA view and check for incoming AiChallenge TXs.
+			c.escrowStore.UpdateDAA(uint64(template.Block.Header.DAAScore))
+			for _, rh := range scanBlockForAiChallengeResponseHashes(template.Block) {
+				c.escrowStore.MarkSlashedByResponse(rh)
 			}
 			state.bigDiff = CalculateTarget(uint64(template.Block.Header.Bits))
 			header, err := SerializeBlockHeader(template.Block)
