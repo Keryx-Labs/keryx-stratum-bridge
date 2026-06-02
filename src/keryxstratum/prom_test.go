@@ -30,4 +30,11 @@ func TestPromValid(t *testing.T) {
 			},
 		},
 	})
+	RecordInferenceResult(&ctx)
+	RecordOPoIChallengePass(&ctx)
+	RecordEscrowClaim(true)
+	RecordEscrowClaim(false)
+	RecordEscrowSlashed("challenge")
+	RecordEscrowSlashed("orphan_max_retries")
+	RecordEscrowSlashed("rejected")
 }

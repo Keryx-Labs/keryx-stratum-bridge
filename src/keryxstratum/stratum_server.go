@@ -75,15 +75,23 @@ func ListenAndServe(cfg BridgeConfig) error {
 		return err
 	}
 
+	escrowStore := NewEscrowStore(ksApi.keryxd, logger.Desugar())
+
 	if cfg.HealthCheckPort != "" {
 		logger.Info("enabling health check on port " + cfg.HealthCheckPort)
 		http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
+		http.HandleFunc("/bridge/pubkey", func(w http.ResponseWriter, r *http.Request) {
+			if escrowStore == nil {
+				http.Error(w, `{"error":"escrow key not loaded"}`, http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"pubkey":"` + escrowStore.PubKeyHex() + `"}`))
+		})
 		go http.ListenAndServe(cfg.HealthCheckPort, nil)
 	}
-
-	escrowStore := NewEscrowStore(ksApi.keryxd, logger.Desugar())
 	shareHandler := newShareHandler(ksApi.keryxd, cfg.IPFSAPIUrl, escrowStore)
 	minDiff := cfg.MinShareDiff
 	if minDiff < 1 {

@@ -120,7 +120,7 @@ func RecordBlockFound(worker *gostratum.StratumContext, nonce, bluescore uint64,
 	labels := commonLabels(worker)
 	labels["nonce"] = fmt.Sprintf("%d", nonce)
 	labels["bluescore"] = fmt.Sprintf("%d", bluescore)
-	labels["hash"] = fmt.Sprintf("%d", hash)
+	labels["hash"] = hash
 	blockGauge.With(labels).Set(1)
 }
 
@@ -198,6 +198,28 @@ func RecordInferenceResult(worker *gostratum.StratumContext) {
 
 func RecordOPoIChallengePass(worker *gostratum.StratumContext) {
 	opOIChallengePassCounter.With(commonLabels(worker)).Inc()
+}
+
+var escrowClaimsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ks_escrow_claims_total",
+	Help: "Number of inference_reward escrows successfully claimed by the bridge",
+}, []string{"type"}) // type: "inference" or "coinbase"
+
+var escrowSlashedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ks_escrow_slashed_total",
+	Help: "Number of escrows slashed (AiChallenge fraud proof or exhausted retries)",
+}, []string{"reason"}) // reason: "challenge", "orphan_max_retries", "rejected"
+
+func RecordEscrowClaim(isInference bool) {
+	t := "coinbase"
+	if isInference {
+		t = "inference"
+	}
+	escrowClaimsTotal.With(prometheus.Labels{"type": t}).Inc()
+}
+
+func RecordEscrowSlashed(reason string) {
+	escrowSlashedTotal.With(prometheus.Labels{"reason": reason}).Inc()
 }
 
 var promInit sync.Once

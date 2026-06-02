@@ -117,6 +117,12 @@ func NewEscrowStore(keryxd *rpcclient.RPCClient, logger *zap.Logger) *EscrowStor
 	return store
 }
 
+// PubKeyHex returns the 64-char hex x-only Schnorr pubkey of the bridge escrow key.
+// Requesters must lock AiRequest.output[1] to this key to enable inference_reward claiming.
+func (e *EscrowStore) PubKeyHex() string {
+	return e.pubKeyHex
+}
+
 // TrackInferenceEscrow registers an AiRequest.output[1] inference escrow.
 // Mirrors Rust EscrowWatcher.track_inference_escrow.
 func (e *EscrowStore) TrackInferenceEscrow(
@@ -168,6 +174,7 @@ func (e *EscrowStore) MarkSlashedByResponse(responseHashHex string) {
 	for _, en := range e.state.Entries {
 		if en.CoinbaseTxID == txID && en.OutputIndex == 1 && !en.Claimed {
 			en.Slashed = true
+			RecordEscrowSlashed("challenge")
 			e.logger.Warn("OPoI escrow: slashed by AiChallenge",
 				zap.String("tx_id", truncate(txID, 8)))
 			e.saveStateLocked()
@@ -298,12 +305,14 @@ func (e *EscrowStore) handleClaimResult(txID string, outIdx uint32, errMsg strin
 		}
 		if errMsg == "" {
 			en.Claimed = true
+			RecordEscrowClaim(en.IsInference)
 		} else {
 			switch {
 			case strings.Contains(errMsg, "orphan"):
 				en.OrphanRetries++
 				if en.OrphanRetries >= maxOrphanRetries {
 					en.Slashed = true
+					RecordEscrowSlashed("orphan_max_retries")
 				} else {
 					en.OrphanSlashed = true
 					retry := currentDAA + orphanRetryCooldown
@@ -314,6 +323,7 @@ func (e *EscrowStore) handleClaimResult(txID string, outIdx uint32, errMsg strin
 				en.OrphanRetryAfterDAA = &retry
 			default:
 				en.Slashed = true
+				RecordEscrowSlashed("rejected")
 				e.logger.Warn("OPoI escrow: claim rejected, slashing",
 					zap.String("tx_id", truncate(txID, 8)), zap.String("err", errMsg))
 			}

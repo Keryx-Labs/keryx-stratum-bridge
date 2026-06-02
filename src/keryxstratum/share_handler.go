@@ -246,14 +246,7 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 			zap.String("miner", ctx.WalletAddr))
 		RecordInferenceResult(ctx)
 		if task := scanBlockForAiTask(submitInfo.block); task != nil {
-			sh.submittedResponsesMu.Lock()
-			alreadySubmitted := sh.submittedResponses[task.RequestHash]
-			if !alreadySubmitted {
-				sh.submittedResponses[task.RequestHash] = true
-			}
-			sh.submittedResponsesMu.Unlock()
-
-			if alreadySubmitted {
+			if sh.markResponseSubmitted(task.RequestHash) {
 				ctx.Logger.Info("OPoI AiResponse TX already submitted for this request, skipping duplicate",
 					zap.String("request_hash", truncate(task.RequestHash, 8)),
 					zap.String("miner", ctx.WalletAddr))
@@ -443,6 +436,18 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 	state.activeChallengeNonce = ""
 	RecordOPoIChallengePass(ctx)
 	return nil
+}
+
+// markResponseSubmitted atomically registers a request hash.
+// Returns true if it was already registered (duplicate — TX should not be re-submitted).
+func (sh *shareHandler) markResponseSubmitted(requestHash string) bool {
+	sh.submittedResponsesMu.Lock()
+	defer sh.submittedResponsesMu.Unlock()
+	if sh.submittedResponses[requestHash] {
+		return true
+	}
+	sh.submittedResponses[requestHash] = true
+	return false
 }
 
 // trackEscrow registers a pending inference_reward escrow after an AiResponse TX is submitted.
