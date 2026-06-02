@@ -433,6 +433,7 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 		zap.Int("result_len", len(resultText)),
 		zap.String("miner", ctx.WalletAddr))
 	state.challengePassed = true
+	state.verified = true // unlock job dispatch — inference capability proven
 	state.activeChallengeNonce = ""
 	RecordOPoIChallengePass(ctx)
 	return nil

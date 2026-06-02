@@ -114,6 +114,16 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				}
 				return
 			}
+			// OPoI gate (Rule #1 — no inference = no mining): withhold all work until the
+			// miner has passed its first capability challenge, and pause job dispatch while
+			// a challenge is in flight. The latter also frees the GPU so the challenge
+			// inference runs uncontended instead of fighting kHeavyHash for the device.
+			state.challengeLock.Lock()
+			gated := !state.verified || state.activeChallengeNonce != ""
+			state.challengeLock.Unlock()
+			if gated {
+				return
+			}
 			template, err := kapi.GetBlockTemplate(client)
 			if err != nil {
 				if strings.Contains(err.Error(), "Could not decode address") {

@@ -3,7 +3,7 @@ package keryxstratum
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -133,9 +133,15 @@ func (s *KeryxApi) startBlockTemplateListener(ctx context.Context, blockReadyCb 
 
 func (ks *KeryxApi) GetBlockTemplate(
 	client *gostratum.StratumContext) (*appmessage.GetBlockTemplateResponseMessage, error) {
+	// OPoI: the node verifies the coinbase tag with verify_tag_fixed(nonce), so the
+	// extra_data must carry "/{nonce_hex16}/ai:v1:{tag_fixed(nonce)}" — exactly like the
+	// solo miner (keryx-miner/src/client/grpc.rs). A random tag without the nonce prefix
+	// is rejected with "OPoI tag missing": parse_opoi needs the embedded nonce to recompute
+	// and check the tag.
 	b := make([]byte, 8)
 	rand.Read(b)
-	opoiTag := "/ai:v1:" + hex.EncodeToString(b)
+	nonce := binary.LittleEndian.Uint64(b)
+	opoiTag := fmt.Sprintf("/%016x/ai:v1:%s", nonce, tagFixed(nonce))
 	template, err := ks.keryxd.GetBlockTemplate(client.WalletAddr,
 		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s`, client.RemoteApp, version, opoiTag))
 	if err != nil {

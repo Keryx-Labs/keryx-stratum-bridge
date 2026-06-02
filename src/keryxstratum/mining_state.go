@@ -28,6 +28,9 @@ type MiningState struct {
 	activeChallengeModel string
 	challengeIssuedAt    time.Time
 	challengePassed      bool
+	// verified flips true the first time the miner passes a capability challenge and
+	// never resets. Until then, no jobs are dispatched: no inference = no mining.
+	verified bool
 }
 
 func MiningStateGenerator() any {
