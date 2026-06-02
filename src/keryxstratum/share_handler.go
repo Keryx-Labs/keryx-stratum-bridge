@@ -34,13 +34,15 @@ type WorkStats struct {
 }
 
 type shareHandler struct {
-	keryxd       *rpcclient.RPCClient
-	ipfsAPIURL   string
-	escrowStore  *EscrowStore
-	stats        map[string]*WorkStats
-	statsLock    sync.Mutex
-	overall      WorkStats
-	tipBlueScore uint64
+	keryxd              *rpcclient.RPCClient
+	ipfsAPIURL          string
+	escrowStore         *EscrowStore
+	stats               map[string]*WorkStats
+	statsLock           sync.Mutex
+	overall             WorkStats
+	tipBlueScore        uint64
+	submittedResponses  map[string]bool
+	submittedResponsesMu sync.Mutex
 }
 
 func newShareHandler(keryxd *rpcclient.RPCClient, ipfsAPIURL string, escrowStore *EscrowStore) *shareHandler {
@@ -48,11 +50,12 @@ func newShareHandler(keryxd *rpcclient.RPCClient, ipfsAPIURL string, escrowStore
 		ipfsAPIURL = "http://127.0.0.1:5001"
 	}
 	return &shareHandler{
-		keryxd:      keryxd,
-		ipfsAPIURL:  ipfsAPIURL,
-		escrowStore: escrowStore,
-		stats:       map[string]*WorkStats{},
-		statsLock:   sync.Mutex{},
+		keryxd:             keryxd,
+		ipfsAPIURL:         ipfsAPIURL,
+		escrowStore:        escrowStore,
+		stats:              map[string]*WorkStats{},
+		statsLock:          sync.Mutex{},
+		submittedResponses: map[string]bool{},
 	}
 }
 
@@ -243,9 +246,22 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 			zap.String("miner", ctx.WalletAddr))
 		RecordInferenceResult(ctx)
 		if task := scanBlockForAiTask(submitInfo.block); task != nil {
-			daaScore := uint64(submitInfo.block.Header.DAAScore)
-			go SubmitAiResponseTX(sh.keryxd, ctx.Logger, task.RequestHash, daaScore, submitInfo.ipfsCID)
-			sh.trackEscrow(ctx, submitInfo.block, task, daaScore)
+			sh.submittedResponsesMu.Lock()
+			alreadySubmitted := sh.submittedResponses[task.RequestHash]
+			if !alreadySubmitted {
+				sh.submittedResponses[task.RequestHash] = true
+			}
+			sh.submittedResponsesMu.Unlock()
+
+			if alreadySubmitted {
+				ctx.Logger.Info("OPoI AiResponse TX already submitted for this request, skipping duplicate",
+					zap.String("request_hash", truncate(task.RequestHash, 8)),
+					zap.String("miner", ctx.WalletAddr))
+			} else {
+				daaScore := uint64(submitInfo.block.Header.DAAScore)
+				go SubmitAiResponseTX(sh.keryxd, ctx.Logger, task.RequestHash, daaScore, submitInfo.ipfsCID)
+				sh.trackEscrow(ctx, submitInfo.block, task, daaScore)
+			}
 		}
 	}
 
