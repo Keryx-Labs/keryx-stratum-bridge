@@ -32,17 +32,22 @@ type WorkStats struct {
 
 type shareHandler struct {
 	keryxd       *rpcclient.RPCClient
+	ipfsAPIURL   string
 	stats        map[string]*WorkStats
 	statsLock    sync.Mutex
 	overall      WorkStats
 	tipBlueScore uint64
 }
 
-func newShareHandler(keryxd *rpcclient.RPCClient) *shareHandler {
+func newShareHandler(keryxd *rpcclient.RPCClient, ipfsAPIURL string) *shareHandler {
+	if ipfsAPIURL == "" {
+		ipfsAPIURL = "http://127.0.0.1:5001"
+	}
 	return &shareHandler{
-		keryxd:    keryxd,
-		stats:     map[string]*WorkStats{},
-		statsLock: sync.Mutex{},
+		keryxd:     keryxd,
+		ipfsAPIURL: ipfsAPIURL,
+		stats:      map[string]*WorkStats{},
+		statsLock:  sync.Mutex{},
 	}
 }
 
@@ -329,25 +334,42 @@ func GetAverageHashrateGHs(stats *WorkStats) float64 {
 }
 
 // HandleDeclareCapabilities stores the SLM model IDs declared by a pool miner.
-// The bridge uses these to challenge the miner with a model it actually has loaded.
+// Validation mirrors the solo miner startup check:
+//  1. model_id must be in the known registry (sha2-256 of weight file is the ID by construction)
+//  2. the primary weight CID must be reachable via IPFS block/stat — proves the file exists
 func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
 	var models []string
 	for _, p := range event.Params {
-		if id, ok := p.(string); ok && len(id) == 64 {
-			models = append(models, id)
+		id, ok := p.(string)
+		if !ok || len(id) != 64 {
+			continue
 		}
+		if !isKnownModel(id) {
+			ctx.Logger.Warn("OPoI declare_capabilities: unknown model_id rejected",
+				zap.String("model_id", id[:8]),
+				zap.String("miner", ctx.WalletAddr))
+			continue
+		}
+		if err := verifyModelOnIPFS(id, sh.ipfsAPIURL); err != nil {
+			ctx.Logger.Warn("OPoI declare_capabilities: weight file not found on IPFS — model not properly downloaded",
+				zap.String("model", modelName(id)),
+				zap.String("miner", ctx.WalletAddr),
+				zap.Error(err))
+			continue
+		}
+		models = append(models, id)
 	}
 	if len(models) == 0 {
-		ctx.Logger.Warn("OPoI declare_capabilities: no valid model IDs received")
+		ctx.Logger.Warn("OPoI declare_capabilities: no valid/verified models — miner will be challenged and kicked")
 		return nil
 	}
 	state := GetMiningState(ctx)
 	state.challengeLock.Lock()
 	state.declaredModels = models
 	state.challengeLock.Unlock()
-	ctx.Logger.Info("OPoI declare_capabilities: miner declared models",
+	ctx.Logger.Info("OPoI declare_capabilities: models verified and accepted",
 		zap.Int("count", len(models)),
-		zap.String("first", models[0][:8]),
+		zap.String("first", modelName(models[0])),
 		zap.String("miner", ctx.WalletAddr))
 	return nil
 }

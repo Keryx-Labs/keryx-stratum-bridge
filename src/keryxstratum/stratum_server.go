@@ -26,6 +26,9 @@ type BridgeConfig struct {
 	BlockWaitTime   time.Duration `yaml:"block_wait_time"`
 	MinShareDiff    uint          `yaml:"min_share_diff"`
 	ExtranonceSize  uint          `yaml:"extranonce_size"`
+	// IPFS API endpoint used to verify miner-submitted CIDs before publishing AiResponse TXs.
+	// Defaults to http://127.0.0.1:5001 if empty.
+	IPFSAPIUrl      string        `yaml:"ipfs_api_url"`
 }
 
 func configureZap(cfg BridgeConfig) (*zap.SugaredLogger, func()) {
@@ -75,7 +78,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 		go http.ListenAndServe(cfg.HealthCheckPort, nil)
 	}
 
-	shareHandler := newShareHandler(ksApi.keryxd)
+	shareHandler := newShareHandler(ksApi.keryxd, cfg.IPFSAPIUrl)
 	minDiff := cfg.MinShareDiff
 	if minDiff < 1 {
 		minDiff = 1
