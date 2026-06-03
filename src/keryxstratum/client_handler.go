@@ -222,7 +222,8 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 	}
 }
 
-const opOIChallengeInterval = 6 * time.Minute
+const opOIChallengeInterval = 60 * time.Minute
+const opOIChallengeDeadline = 5 * time.Minute
 
 // startChallengeLoop periodically sends OPoI capability challenges to all connected miners.
 // The challenge model is picked randomly from those declared by the miner via
@@ -296,9 +297,9 @@ func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
 		return
 	}
 
-	// Deadline timer: kick immediately if no response within the challenge window.
+	// Deadline timer: kick if no response within the deadline window.
 	go func() {
-		time.Sleep(opOIChallengeInterval)
+		time.Sleep(opOIChallengeDeadline)
 		state.challengeLock.Lock()
 		unanswered := state.activeChallengeNonce == nonceHex
 		state.challengeLock.Unlock()
