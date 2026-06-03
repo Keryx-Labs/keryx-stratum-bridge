@@ -1,0 +1,30 @@
+{
+  "entries": [
+    {
+      "coinbase_txid": "a2c5159f752162a64cef2a073c25156fb01119ec4eade2270846817ce3ebecca",
+      "block_hash": "",
+      "confirm_daa": 20102994,
+      "amount_sompi": 108000000,
+      "output_index": 9,
+      "claimed": true,
+      "slashed": false,
+      "orphan_slashed": false,
+      "orphan_retries": 0,
+      "orphan_retry_after_daa": null,
+      "is_inference": false
+    },
+    {
+      "coinbase_txid": "b30f3be7e047af906e2c77bd8de76216a3c4afeebcec1cd92a59cec28099a89b",
+      "block_hash": "",
+      "confirm_daa": 20660231,
+      "amount_sompi": 108000000,
+      "output_index": 2,
+      "claimed": false,
+      "slashed": false,
+      "orphan_slashed": false,
+      "orphan_retries": 0,
+      "orphan_retry_after_daa": null,
+      "is_inference": false
+    }
+  ]
+}
