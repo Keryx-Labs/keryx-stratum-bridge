@@ -19,7 +19,7 @@
       "confirm_daa": 20660231,
       "amount_sompi": 108000000,
       "output_index": 2,
-      "claimed": false,
+      "claimed": true,
       "slashed": false,
       "orphan_slashed": false,
       "orphan_retries": 0,

@@ -61,6 +61,17 @@ func (ms *MiningState) GetJob(id int) (*appmessage.RPCBlock, bool) {
 	return job, exists
 }
 
+// DeclaredModels returns a copy of the model IDs the miner declared via
+// mining.declare_capabilities, for embedding in the coinbase `ai:cap` field so
+// consensus can scale the block's miner reward by the tier actually served.
+func (ms *MiningState) DeclaredModels() []string {
+	ms.challengeLock.Lock()
+	defer ms.challengeLock.Unlock()
+	out := make([]string, len(ms.declaredModels))
+	copy(out, ms.declaredModels)
+	return out
+}
+
 // HasDeclaredModel reports whether the miner declared the given model ID.
 func (ms *MiningState) HasDeclaredModel(modelIDHex string) bool {
 	ms.challengeLock.Lock()

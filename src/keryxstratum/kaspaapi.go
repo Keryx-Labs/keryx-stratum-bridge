@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kaspanet/kaspad/app/appmessage"
@@ -152,8 +153,16 @@ func (ks *KeryxApi) GetBlockTemplate(
 		escrowPart = "/escrow:" + ks.escrowPubKey
 	}
 	opoiTag := fmt.Sprintf("%s/%016x/ai:v1:%s", escrowPart, nonce, tagFixed(nonce))
+	// Tier-reward: declare this miner's verified models in the coinbase ai:cap field so the
+	// node scales the block's miner subsidy by the highest tier actually served. Mirrors the
+	// solo miner (keryx-miner/src/client/grpc.rs). Without it consensus sees no declared tier
+	// and floors the reward to the lightest model once tier_reward_activation is live.
+	capPart := ""
+	if models := GetMiningState(client).DeclaredModels(); len(models) > 0 {
+		capPart = "/ai:cap:" + strings.Join(models, ",")
+	}
 	template, err := ks.keryxd.GetBlockTemplate(client.WalletAddr,
-		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s`, client.RemoteApp, version, opoiTag))
+		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s%s`, client.RemoteApp, version, opoiTag, capPart))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed fetching new block template from keryx")
 	}
