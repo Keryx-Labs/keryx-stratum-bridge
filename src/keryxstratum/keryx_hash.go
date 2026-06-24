@@ -16,7 +16,15 @@ var keryxMatrixSalt = [32]byte{'K', 'E', 'R', 'Y', 'X', ':', 'K', 'e', 'r', 'y',
 // keryxMatrixSaltV2 replaces v1 after saltV2ActivationDAA (hard fork 2026-05-30).
 var keryxMatrixSaltV2 = [32]byte{'K', 'E', 'R', 'Y', 'X', ':', 'K', 'e', 'r', 'y', 'x', 'H', 'a', 's', 'h', '-', 'v', '2', ':', '2', '0', '2', '6', '-', '0', '5', '-', '2', '9', ':', 'x', 'x'}
 
+// keryxMatrixSaltV4 replaces v2 after saltV4ActivationDAA (v1.2.6 relaunch). v3 was
+// an abandoned minority fork and never reached the live chain, so it is skipped here.
+var keryxMatrixSaltV4 = [32]byte{'K', 'E', 'R', 'Y', 'X', ':', 'K', 'e', 'r', 'y', 'x', 'H', 'a', 's', 'h', '-', 'v', '4', ':', '2', '0', '2', '6', '-', '0', '6', '-', '0', '7', ':', 'x', 'x'}
+
 const saltV2ActivationDAA uint64 = 17_275_000
+
+// saltV4ActivationDAA must match keryx-miner POW_SALT_V4_ACTIVATION_DAA and the node's
+// MAINNET_PARAMS.pow_salt_v4_activation = new(21_932_751).
+const saltV4ActivationDAA uint64 = 21_932_751
 
 // waveMixKeys are the per-round XOR constants for the ARX post-processing step.
 var waveMixKeys = [4]uint64{
@@ -66,11 +74,13 @@ func (rng *xoShiRo256PlusPlus) next() uint64 {
 type keryxMatrix [64][64]uint16
 
 // generateKeryxMatrix derives the 64×64 PoW matrix from a pre_pow_hash.
-// The active salt is selected based on daaScore: v2 salt after saltV2ActivationDAA,
-// v1 salt before. Changing the salt is an incompatible hard fork.
+// The active salt is selected based on daaScore: v4 after saltV4ActivationDAA, v2 after
+// saltV2ActivationDAA, v1 before. Changing the salt is an incompatible hard fork.
 func generateKeryxMatrix(prePowHash [32]byte, daaScore uint64) keryxMatrix {
 	salt := keryxMatrixSalt
-	if daaScore >= saltV2ActivationDAA {
+	if daaScore >= saltV4ActivationDAA {
+		salt = keryxMatrixSaltV4
+	} else if daaScore >= saltV2ActivationDAA {
 		salt = keryxMatrixSaltV2
 	}
 	var salted [32]byte
@@ -213,7 +223,7 @@ func applyKeryxHash(mat keryxMatrix, powHash [32]byte) [32]byte {
 }
 
 // CalculateKeryxPoW returns the KeryxHash PoW value as a big.Int for comparison
-// against the block target. daaScore selects the active matrix salt (v1 or v2).
+// against the block target. daaScore selects the active matrix salt (v1, v2 or v4).
 func CalculateKeryxPoW(prePowHash [32]byte, timestamp, nonce, daaScore uint64) *big.Int {
 	powHash := computePowHash(prePowHash, timestamp, nonce)
 	matrix := generateKeryxMatrix(prePowHash, daaScore)
