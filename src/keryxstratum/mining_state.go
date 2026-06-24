@@ -31,6 +31,11 @@ type MiningState struct {
 	// verified flips true the first time the miner passes a capability challenge and
 	// never resets. Until then, no jobs are dispatched: no inference = no mining.
 	verified bool
+	// holdsEnough reflects the last balance check of the worker's payout address vs the
+	// configured min-holding threshold. Default false (fail-closed: gated until the first
+	// periodic balance check confirms holdings). Only consulted when minHoldingSompi > 0.
+	// Guarded by challengeLock.
+	holdsEnough bool
 }
 
 func MiningStateGenerator() any {

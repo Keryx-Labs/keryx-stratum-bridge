@@ -47,4 +47,14 @@ prom_port: :2114
 # AiRequest.output[1] CSV P2PK script.  Leave unset to use default path.
 # escrow_key_file: "escrow.key"
 
+# min_holding_krx: balance-reward gate (option A). A worker whose PAYOUT address holds fewer
+# than this many KRX is not given work (no holdings = no mining in this pool). This forces pool
+# workers to hold KRX too — not just the pool operator — so miners can't escape the holding
+# requirement by joining a pool. Self-binding on the payout address (can't borrow someone
+# else's balance, since the pool pays rewards there). Fail-closed: a worker is gated until the
+# first periodic balance check (~1 min) confirms its holdings. 0 / unset disables the gate.
+# Must be set on every pool that wants to enforce holdings (it's a pool-level policy; a
+# non-cooperating pool can simply not set it — the consensus balance-reward still applies).
+# min_holding_krx: 50000
+
 

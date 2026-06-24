@@ -34,19 +34,23 @@ type clientListener struct {
 	extranonceSize   int8
 	maxExtranonce    int32
 	nextExtranonce   int32
+	// Balance-reward gate: workers whose payout address holds < minHoldingSompi are not
+	// dispatched jobs (no holdings = no mining in this pool). 0 disables the gate.
+	minHoldingSompi uint64
 }
 
-func newClientListener(logger *zap.SugaredLogger, shareHandler *shareHandler, minShareDiff float64, extranonceSize int8, escrowStore *EscrowStore) *clientListener {
+func newClientListener(logger *zap.SugaredLogger, shareHandler *shareHandler, minShareDiff float64, extranonceSize int8, escrowStore *EscrowStore, minHoldingSompi uint64) *clientListener {
 	return &clientListener{
-		logger:         logger,
-		minShareDiff:   minShareDiff,
-		extranonceSize: extranonceSize,
-		maxExtranonce:  int32(math.Pow(2, (8*math.Min(float64(extranonceSize), 3))) - 1),
-		nextExtranonce: 0,
-		clientLock:     sync.RWMutex{},
-		shareHandler:   shareHandler,
-		escrowStore:    escrowStore,
-		clients:        make(map[int32]*gostratum.StratumContext),
+		logger:          logger,
+		minShareDiff:    minShareDiff,
+		extranonceSize:  extranonceSize,
+		maxExtranonce:   int32(math.Pow(2, (8*math.Min(float64(extranonceSize), 3))) - 1),
+		nextExtranonce:  0,
+		clientLock:      sync.RWMutex{},
+		shareHandler:    shareHandler,
+		escrowStore:     escrowStore,
+		clients:         make(map[int32]*gostratum.StratumContext),
+		minHoldingSompi: minHoldingSompi,
 	}
 }
 
@@ -119,7 +123,8 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			// a challenge is in flight. The latter also frees the GPU so the challenge
 			// inference runs uncontended instead of fighting kHeavyHash for the device.
 			state.challengeLock.Lock()
-			gated := !state.verified || state.activeChallengeNonce != ""
+			gated := !state.verified || state.activeChallengeNonce != "" ||
+				(c.minHoldingSompi > 0 && !state.holdsEnough)
 			state.challengeLock.Unlock()
 			if gated {
 				return
@@ -173,13 +178,19 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			} else {
 				jobParams = append(jobParams, GenerateJobHeader(header))
 				jobParams = append(jobParams, template.Block.Header.Timestamp)
+				// Always carry the real DAA score (ShortV2 notify, 4 params) so the miner
+				// can select the correct PoW salt era and gate PoM at the hardfork. Without
+				// it the miner falls back to the legacy 3-param short notify and pins DAA to
+				// the salt-v4 era, which sits below the PoM activation height — it would never
+				// switch to PoM and would fork at H.
+				jobParams = append(jobParams, uint64(template.Block.Header.DAAScore))
 			}
 
 			// If the block template carries a pending AiRequest, dispatch it only to miners
 			// that have declared the required model via mining.declare_capabilities.
 			if task := scanBlockForAiTask(template.Block); task != nil {
 				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob && state.HasDeclaredModel(task.ModelIDHex) {
-					jobParams = append(jobParams, uint64(template.Block.Header.DAAScore))
+					// DAA already appended above; add only the task JSON → MiningNotifyWithTask (5 params).
 					jobParams = append(jobParams, taskJSON)
 				}
 			}
@@ -217,6 +228,32 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 					return
 				}
 				RecordBalances(balances)
+				// Balance-reward gate: refresh each worker's holdsEnough from its payout-address
+				// balance. Self-binding: a worker can't borrow a whale's balance because the pool
+				// pays rewards to this very address. Hostile pools can disable this — cooperative layer.
+				if c.minHoldingSompi > 0 {
+					bal := make(map[string]uint64, len(balances.Entries))
+					for _, e := range balances.Entries {
+						bal[e.Address] = e.Balance
+					}
+					c.clientLock.RLock()
+					for _, cl := range c.clients {
+						if cl.WalletAddr == "" {
+							continue
+						}
+						ok := bal[cl.WalletAddr] >= c.minHoldingSompi
+						st := GetMiningState(cl)
+						st.challengeLock.Lock()
+						was := st.holdsEnough
+						st.holdsEnough = ok
+						st.challengeLock.Unlock()
+						if !ok && was {
+							cl.Logger.Warn("insufficient KRX holdings at payout address — mining gated until balance >= threshold",
+								zap.String("addr", cl.WalletAddr), zap.Uint64("min_sompi", c.minHoldingSompi))
+						}
+					}
+					c.clientLock.RUnlock()
+				}
 			}()
 		}
 	}

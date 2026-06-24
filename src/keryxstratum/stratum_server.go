@@ -34,6 +34,12 @@ type BridgeConfig struct {
 	// Leave unset to use the default; set to "" to disable escrow claiming.
 	// The corresponding pubkey is logged at startup so requesters know which key to use.
 	EscrowKeyFile string `yaml:"escrow_key_file"`
+	// MinHoldingKRX is the balance-reward gate: a worker whose payout address holds fewer than
+	// this many KRX is not dispatched jobs (no holdings = no mining in this pool). This forces
+	// pool workers to hold KRX too — not just the pool operator — closing the "flee to a pool to
+	// dodge holding" loophole. 0 (default) disables the gate. Self-binding on the payout address,
+	// so it can't be gamed by pointing at someone else's balance.
+	MinHoldingKRX float64 `yaml:"min_holding_krx"`
 }
 
 func configureZap(cfg BridgeConfig) (*zap.SugaredLogger, func()) {
@@ -105,7 +111,8 @@ func ListenAndServe(cfg BridgeConfig) error {
 	if extranonceSize > 3 {
 		extranonceSize = 3
 	}
-	clientHandler := newClientListener(logger, shareHandler, float64(minDiff), int8(extranonceSize), escrowStore)
+	minHoldingSompi := uint64(cfg.MinHoldingKRX * 1e8)
+	clientHandler := newClientListener(logger, shareHandler, float64(minDiff), int8(extranonceSize), escrowStore, minHoldingSompi)
 	handlers := gostratum.DefaultHandlers()
 	handlers[string(gostratum.StratumMethodSubmit)] =
 		func(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
