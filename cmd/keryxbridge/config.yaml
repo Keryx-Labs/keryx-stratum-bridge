@@ -57,4 +57,23 @@ prom_port: :2114
 # non-cooperating pool can simply not set it — the consensus balance-reward still applies).
 # min_holding_krx: 50000
 
+# ipfs_api_url: IPFS Kubo API used to verify model weights at declare_capabilities and the CIDs
+# miners submit. Defaults to http://127.0.0.1:5001. When this API is local and unreachable at
+# startup, the bridge auto-starts a kubo daemon (see ipfs_binary).
+# ipfs_api_url: http://127.0.0.1:5001
+
+# ipfs_binary: kubo binary the bridge auto-starts when the local IPFS API is down at startup.
+# Empty = look for an `ipfs` next to the bridge executable, then in PATH.
+# ipfs_binary: ./ipfs
+
+# escrow_cert: H6 escrow delegation cert (128 hex) announced as /esig:, produced by
+# `keryx-cli delegate-escrow <bridge_escrow_pubkey> <payout_address>` (the bridge logs its escrow
+# pubkey at startup). From H6 the node rejects every block template without a valid /escrow +
+# /esig pair. The cert binds the escrow key to ONE payout address, so every worker must mine with
+# that exact address (single-address pools only).
+# The value below is an EXAMPLE, bound to the throwaway payout address
+# keryx:qz6yf2v36z7379y6dgaqfjk2exa7wv5cju2t4shwkt27xh4pyzvngs6l8kz6h — replace it (and mine with
+# your own payout address) for real use.
+escrow_cert: 76213db980f7686530b84f7fe195261aa13720d0d4c778495db22b32682745d01bd49ba470883e7a88eeb579ce86133ded206791bae8800cc20d6d57c2f7f335
+
 

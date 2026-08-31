@@ -16,23 +16,28 @@ type modelSpec struct {
 }
 
 // knownModelRegistry maps model_id hex to its spec.
-// Ported from keryx-miner/src/models.rs.
+// Ported from keryx-miner/src/models.rs — the five-tier lineup active since H6.
+// model_id hex = base58decode(weightCID)[2..34].
 var knownModelRegistry = map[string]modelSpec{
-	"e64af368ec9351a5a4c0ec7ae47d42ada7f6b3f1a6e60fc73d0eb6ca2953645c": {
-		name:      "tinyllama",
-		weightCID: "QmdqcmS8aMngiZWYYdeZEaW22N6XRTd9zK5ZCJG1MPmrQ3",
+	"bd34568cd89f5f19c6c3a6e1a61b929bc868709409eaad8e672d85f3c1eb5710": {
+		name:      "qwen3.5-9b-abliterated",
+		weightCID: "Qmb5E3zospd78SfiRHB9iZWNz29xuwRJufieZbWzEFBuGB",
 	},
-	"9429673316bc40ec0667894534578b41236fc7eea4d931f1489c34c5837f42f4": {
-		name:      "deepseek-r1-8b",
-		weightCID: "QmYK1faUGNMYZ2UKeSpUoUoFpRarZQEwfPCHbYNG2ib2mR",
+	"fa2f13be0850e26c5ce86c7ac79da85e300c1da8b3290f9a18d47105f1f2140a": {
+		name:      "glm-4-9b-0414",
+		weightCID: "QmfBGGZumBR4XGFLLPjYozvhRSt3kXjrgsV3jXciCdAeM7",
 	},
-	"bed9b0f551f5b95bf9da5888a48f0f87c37ad6b72519c4cbd775f54ac0b9fc62": {
-		name:      "deepseek-r1-32b",
-		weightCID: "QmSrmkEoJUPf7r9t4o79F5APycnGrRu2icaU3KKPdFVUk7",
+	"399984045600f7d58d1b2cf01e6a4bf466fa15c7ac31bd0dd1a71e003b617cc6": {
+		name:      "gemma-4-12b-abliterated",
+		weightCID: "QmSDVicqRDwitecBaPitHsAePLUEamgL4KfrBWYHVWQyx9",
 	},
-	"aad2cf3348d8c7fdbd2c0dd58e0d99368450d43c9584aef81a467dd347561344": {
-		name:      "llama-3.3-70b",
-		weightCID: "QmbRQJFZ9NuZQW9uXezANTwunnwJCKybHiCFnVQ7D4SZKb",
+	"b8bdc01fa407eab943e4fefc807483b39f8142785256049e1f559698a5284746": {
+		name:      "qwen3.6-27b",
+		weightCID: "QmamoYQGGAkBaqiWuNmwxeC9AQnt9F7sLyX57VoqbJWeUV",
+	},
+	"3dc09358ad75c6ef0c9c86ee4f47c4d6acda961fecbd0e4f9cf55e8f0fdffddb": {
+		name:      "kimi-linear-48b",
+		weightCID: "QmSVhtoNrL8bWJXZuEXMMWqty8qHScQMRuacuoa9ujsYqp",
 	},
 }
 

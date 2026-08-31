@@ -29,6 +29,13 @@ type BridgeConfig struct {
 	// IPFS API endpoint used to verify miner-submitted CIDs before publishing AiResponse TXs.
 	// Defaults to http://127.0.0.1:5001 if empty.
 	IPFSAPIUrl string `yaml:"ipfs_api_url"`
+	// IPFSBinary is the kubo binary to auto-start when the (local) IPFS API is down at
+	// startup. Empty = look next to the bridge executable, then in PATH.
+	IPFSBinary string `yaml:"ipfs_binary"`
+	// EscrowCert is the 128-hex H6 delegation cert announced as /esig:<cert>. It binds the
+	// bridge's escrow key to ONE payout address (produced by `keryx-cli delegate-escrow`),
+	// so every worker must mine with that exact address. Single-address setups only.
+	EscrowCert string `yaml:"escrow_cert"`
 	// EscrowKeyFile is the path to the 64-char hex Schnorr private key file used to claim
 	// inference_reward escrows.  Defaults to "escrow.key" (same file as keryx-miner).
 	// Leave unset to use the default; set to "" to disable escrow claiming.
@@ -72,6 +79,10 @@ func ListenAndServe(cfg BridgeConfig) error {
 		StartPromServer(logger, cfg.PromPort)
 	}
 
+	// Model verification (declare_capabilities) needs the IPFS API from the very first
+	// miner connection — bring the local daemon up before serving.
+	ensureIPFSDaemon(logger, effectiveIPFSURL(cfg.IPFSAPIUrl), cfg.IPFSBinary)
+
 	blockWaitTime := cfg.BlockWaitTime
 	if blockWaitTime < minBlockWaitTime {
 		blockWaitTime = minBlockWaitTime
@@ -85,6 +96,11 @@ func ListenAndServe(cfg BridgeConfig) error {
 	if escrowStore != nil {
 		// Embed this key in every coinbase so the 20% escrow cut is recoverable, not burned.
 		ksApi.escrowPubKey = escrowStore.PubKeyHex()
+	}
+	// H6 delegation cert (/esig:) binding the escrow key to the single payout address.
+	ksApi.escrowCert = cfg.EscrowCert
+	if cfg.EscrowCert == "" {
+		logger.Warn("no escrow_cert configured — the node rejects every template past H6 (mining requires an escrow delegation)")
 	}
 
 	if cfg.HealthCheckPort != "" {

@@ -37,6 +37,9 @@ type KeryxApi struct {
 	// It tells the node to route the 20% escrow cut to a CSV-locked output (claimable after
 	// 36 000 blocks) instead of burning it. Empty = no escrow key available → cut is burned.
 	escrowPubKey string
+	// escrowCert is the 128-hex delegation cert embedded as /esig:<cert>. From H6 the node
+	// rejects a template without a valid /escrow + /esig pair. Empty = no cert available.
+	escrowCert string
 }
 
 func NewKeryxAPI(address string, blockWaitTime time.Duration, logger *zap.SugaredLogger) (*KeryxApi, error) {
@@ -164,6 +167,10 @@ func (ks *KeryxApi) GetBlockTemplate(
 	escrowPart := ""
 	if ks.escrowPubKey != "" {
 		escrowPart = "/escrow:" + ks.escrowPubKey
+	}
+	// H6: the delegation cert authorizing this escrow key for the payout address.
+	if ks.escrowCert != "" {
+		escrowPart += "/esig:" + ks.escrowCert
 	}
 	opoiTag := fmt.Sprintf("%s/%016x/ai:v1:%s", escrowPart, nonce, tagFixed(nonce))
 	// Tier-reward: declare this miner's verified models in the coinbase ai:cap field so the

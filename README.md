@@ -3,10 +3,7 @@
 This is a lightweight daemon that allows mining to a local (or remote) keryx node using stratum-base miners.
 
 This daemon is confirmed working with the miners below in both dual-mining and keryx-only modes (for those that support it) and Windows/MacOs/Linux/HiveOs.
-* bzminer
-* lolminer
-* srbminer
-* teamreadminer
+* keryx-miner (v0.5.4+ for PoM / stratum v3)
 
 No fee, forever. Do what you want with it.
 
@@ -15,31 +12,44 @@ Discord: [Keryx Community](https://discord.gg/keryx-labs)
 Forked from https://github.com/onemorebsmith/kaspa-stratum-bridge — rebranded for Keryx.
 
 
-## ⚠️ Compatibility: legacy / non-PoM after the PoM hard fork
+## PoM support (stratum v3)
 
-This bridge is **kHeavyHash-only**. It validates shares by recomputing the KeryxHash
-PoW (salt v1/v2/v4) and is correct up to the Proof-of-Model hard fork
-(`pom_activation`, mainnet DAA **37_780_000**, 2026-06-26 18:00 UTC). **After that
-height it cannot produce valid blocks**, by design:
+Since the Proof-of-Model hard fork (`pom_activation`, mainnet DAA **37_780_000**), a
+valid block must carry a per-miner possession proof in `RpcBlock.pomProof` (proto field
+4, borsh-encoded `PomProof`). This bridge supports it end-to-end via **stratum v3**:
 
-- Under PoM the block must carry a per-miner possession proof in `RpcBlock.pomProof`
-  (proto field 4, borsh-encoded `PomProof`).
-- The stratum protocol here only carries a nonce — the miner never ships its proof to
-  the bridge, and the bridge cannot recompute one without loading the tier weights and
-  re-running the memory-hard walk. This is exactly the **pool-resistance** PoM is meant
-  to provide (the verifier/assembler must itself possess the model).
-- The bridge also depends on **upstream `kaspanet/kaspad`**, whose `RpcBlock` has no
-  `pomProof` field, so it cannot even put a proof on the wire to `keryxd`.
+- Miners that declare the `keryx-stratum-v3` capability (keryx-miner v0.5.4+) ship their
+  borsh `PomProof` in the `mining.submit` 6th parameter; the bridge validates the
+  proof-bound PoW value and relays the proof to `keryxd`.
+- `mining.notify` carries the real DAA score and block bits so the miner selects the
+  right PoW salt era and gates PoM at the fork.
+- Block submission goes through a Keryx-aware gRPC client that carries the PoM header
+  fields upstream `kaspanet/kaspad` drops (`pomProof`, `pomFinalState`,
+  `serviceStateHash`, `pomTier`).
+- Pre-v3 miners still work in the legacy kHeavyHash path (valid only below the PoM gate).
 
-**Use this bridge only for solo-via-stratum / pre-PoM setups.** Solo miners mining
-directly to `keryxd` (gRPC, no stratum) are unaffected — they assemble the full block,
-including `pom_proof`, themselves.
+This requires a synced `keryxd`, a running IPFS (kubo) daemon, and an H6 escrow
+delegation cert — see **Requirements** below.
 
-A pool that wants to support PoM must implement the proof pass-through itself: extend
-the stratum submit to carry the borsh `PomProof`, verify it weights-free (Merkle
-openings to the tier root `R_T` + recompute `pow_value`), and embed it in
-`RpcBlock.pomProof` (requires a kaspad build with that proto field). That work is left
-to pool operators on purpose.
+> Legacy note: solo miners mining directly to `keryxd` (gRPC, no stratum) assemble the
+> full block, including the proof, themselves and are unaffected by any of this.
+
+
+## Requirements (PoM / H6)
+
+- **keryxd** — a synced node (default gRPC `127.0.0.1:22110`).
+- **IPFS (kubo)** — the bridge verifies model weights (at `declare_capabilities`) and the
+  inference CIDs miners submit against a local kubo daemon (default API
+  `http://127.0.0.1:5001`). Install kubo from https://dist.ipfs.tech. When the local API
+  is down at startup the bridge auto-starts kubo: it uses `ipfs_binary` from the config,
+  else an `ipfs` next to the executable, else one in `PATH`. A convenience symlink
+  `cmd/keryxbridge/ipfs` ships in the repo pointing at the maintainer's kubo — **re-point
+  it at your own binary**: `ln -sf /path/to/ipfs cmd/keryxbridge/ipfs`.
+- **Escrow delegation cert (H6+)** — from H6 the node rejects any block template without a
+  valid `/escrow` + `/esig` pair. Generate a cert binding the bridge escrow key (logged at
+  startup) to your payout address with
+  `keryx-cli delegate-escrow <escrow_pubkey> <payout_address>`, then set `escrow_cert` in
+  the config. All workers must mine with that exact payout address (single-address pools).
 
 
 ## Hive Setup
@@ -120,7 +130,7 @@ Detailed:
 
 ## Manual build
 
-Install go 1.19 using whatever package manager is appropriate for your system
+Install go 1.18+ using whatever package manager is appropriate for your system
 
 
 run `cd cmd/keryxbridge;go build .`

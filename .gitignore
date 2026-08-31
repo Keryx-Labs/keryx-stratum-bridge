@@ -29,3 +29,6 @@ __debug_bin
 cmd/kaspabridge/kaspabridge
 cmd/kaspabridge/bridge.
 release/
+# Bridge local runtime logs — never commit
+cmd/keryxbridge/bridge.log
+cmd/keryxbridge/kubo.log
