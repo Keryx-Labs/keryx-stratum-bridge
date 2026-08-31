@@ -1,0 +1,19 @@
+// Trimmed mirror of the node's messages.proto: only the RPC payloads the bridge
+// exchanges over protowire.RPC/MessageStream. Oneof field numbers MUST match the
+// node's KaspadMessage; any other payload type decodes to a nil Payload and is
+// skipped by the client read loop.
+syntax = "proto3";
+package keryxwire;
+
+option go_package = "github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc/keryxwire";
+
+import "keryx_rpc.proto";
+
+message KaspadMessage {
+  oneof payload {
+    SubmitBlockRequestMessage submitBlockRequest = 1003;
+    SubmitBlockResponseMessage submitBlockResponse = 1004;
+    GetBlockTemplateRequestMessage getBlockTemplateRequest = 1005;
+    GetBlockTemplateResponseMessage getBlockTemplateResponse = 1006;
+  }
+}

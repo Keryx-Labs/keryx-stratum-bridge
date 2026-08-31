@@ -10,6 +10,7 @@ import (
 	"math/big"
 
 	"github.com/kaspanet/kaspad/app/appmessage"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc/keryxwire"
 	"golang.org/x/crypto/blake2b"
 )
 
@@ -107,6 +108,70 @@ func SerializeBlockHeader(template *appmessage.RPCBlock) ([]byte, error) {
 
 	final := hasher.Sum(nil)
 	return final, nil
+}
+
+// PostPomBlockHash computes the real block hash of a proof-carrying block: the
+// pre-PoW layout with actual timestamp/nonce, then the PoM tail (final state, the
+// node's service-state seal, tier). Any block the bridge submits with a proof is in
+// that era, so the tail is unconditional here.
+func PostPomBlockHash(block *keryxwire.RpcBlock) ([]byte, error) {
+	header := block.Header
+	hasher, err := blake2b.New(32, []byte("BlockHash"))
+	if err != nil {
+		return nil, err
+	}
+	write16(hasher, uint16(header.Version))
+	write64(hasher, uint64(len(header.Parents)))
+	for _, level := range header.Parents {
+		write64(hasher, uint64(len(level.ParentHashes)))
+		for _, parentHash := range level.ParentHashes {
+			writeHexString(hasher, parentHash)
+		}
+	}
+	writeHexString(hasher, header.HashMerkleRoot)
+	writeHexString(hasher, header.AcceptedIdMerkleRoot)
+	writeHexString(hasher, header.UtxoCommitment)
+
+	data := struct {
+		TS        uint64
+		Bits      uint32
+		Nonce     uint64
+		DAAScore  uint64
+		BlueScore uint64
+	}{
+		TS:        uint64(header.Timestamp),
+		Bits:      header.Bits,
+		Nonce:     header.Nonce,
+		DAAScore:  header.DaaScore,
+		BlueScore: header.BlueScore,
+	}
+	detailsBuff := &bytes.Buffer{}
+	if err := binary.Write(detailsBuff, binary.LittleEndian, data); err != nil {
+		return nil, err
+	}
+	hasher.Write(detailsBuff.Bytes())
+
+	bw := header.BlueWork
+	if len(bw)%2 == 1 {
+		bw = "0" + bw
+	}
+	decoded, _ := hex.DecodeString(bw)
+	write64(hasher, uint64(len(decoded)))
+	hasher.Write(decoded)
+	writeHexString(hasher, header.PruningPoint)
+
+	write64(hasher, header.PomFinalState)
+	seal := make([]byte, 32)
+	if header.ServiceStateHash != "" {
+		decodedSeal, err := hex.DecodeString(header.ServiceStateHash)
+		if err == nil && len(decodedSeal) == 32 {
+			copy(seal, decodedSeal)
+		}
+	}
+	hasher.Write(seal)
+	hasher.Write([]byte{byte(header.PomTier)})
+
+	return hasher.Sum(nil), nil
 }
 
 func GenerateJobHeader(headerData []byte) []uint64 {

@@ -15,6 +15,33 @@ Discord: [Keryx Community](https://discord.gg/keryx-labs)
 Forked from https://github.com/onemorebsmith/kaspa-stratum-bridge — rebranded for Keryx.
 
 
+## ⚠️ Compatibility: legacy / non-PoM after the PoM hard fork
+
+This bridge is **kHeavyHash-only**. It validates shares by recomputing the KeryxHash
+PoW (salt v1/v2/v4) and is correct up to the Proof-of-Model hard fork
+(`pom_activation`, mainnet DAA **37_780_000**, 2026-06-26 18:00 UTC). **After that
+height it cannot produce valid blocks**, by design:
+
+- Under PoM the block must carry a per-miner possession proof in `RpcBlock.pomProof`
+  (proto field 4, borsh-encoded `PomProof`).
+- The stratum protocol here only carries a nonce — the miner never ships its proof to
+  the bridge, and the bridge cannot recompute one without loading the tier weights and
+  re-running the memory-hard walk. This is exactly the **pool-resistance** PoM is meant
+  to provide (the verifier/assembler must itself possess the model).
+- The bridge also depends on **upstream `kaspanet/kaspad`**, whose `RpcBlock` has no
+  `pomProof` field, so it cannot even put a proof on the wire to `keryxd`.
+
+**Use this bridge only for solo-via-stratum / pre-PoM setups.** Solo miners mining
+directly to `keryxd` (gRPC, no stratum) are unaffected — they assemble the full block,
+including `pom_proof`, themselves.
+
+A pool that wants to support PoM must implement the proof pass-through itself: extend
+the stratum submit to carry the borsh `PomProof`, verify it weights-free (Merkle
+openings to the tier root `R_T` + recompute `pow_value`), and embed it in
+`RpcBlock.pomProof` (requires a kaspad build with that proto field). That work is left
+to pool operators on purpose.
+
+
 ## Hive Setup
 [detailed instructions here](hive-setup.md)
 

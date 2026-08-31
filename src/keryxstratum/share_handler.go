@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,10 +17,22 @@ import (
 	"github.com/kaspanet/kaspad/domain/consensus/utils/consensushashing"
 	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
 	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc/keryxwire"
 	"github.com/pkg/errors"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/blake2b"
+	"google.golang.org/protobuf/proto"
+)
+
+// Borsh PomProof fixed prefix: tier u8 | trace_root [32] | pow_value [32] | final_state u64 LE.
+// Identical across every proof era, so the bridge can read the header-bound fields
+// without a full borsh decoder.
+const (
+	pomProofMinLen          = 73
+	pomProofPowValueOffset  = 33
+	pomProofFinalStateStart = 65
 )
 
 type WorkStats struct {
@@ -35,6 +48,7 @@ type WorkStats struct {
 
 type shareHandler struct {
 	keryxd              *rpcclient.RPCClient
+	wire                *keryxrpc.Client
 	ipfsAPIURL          string
 	escrowStore         *EscrowStore
 	stats               map[string]*WorkStats
@@ -45,12 +59,13 @@ type shareHandler struct {
 	submittedResponsesMu sync.Mutex
 }
 
-func newShareHandler(keryxd *rpcclient.RPCClient, ipfsAPIURL string, escrowStore *EscrowStore) *shareHandler {
+func newShareHandler(keryxd *rpcclient.RPCClient, wire *keryxrpc.Client, ipfsAPIURL string, escrowStore *EscrowStore) *shareHandler {
 	if ipfsAPIURL == "" {
 		ipfsAPIURL = "http://127.0.0.1:5001"
 	}
 	return &shareHandler{
 		keryxd:             keryxd,
+		wire:               wire,
 		ipfsAPIURL:         ipfsAPIURL,
 		escrowStore:        escrowStore,
 		stats:              map[string]*WorkStats{},
@@ -88,12 +103,14 @@ func (sh *shareHandler) getCreateStats(ctx *gostratum.StratumContext) *WorkStats
 }
 
 type submitInfo struct {
-	block    *appmessage.RPCBlock
-	state    *MiningState
-	noncestr string
-	nonceVal uint64
-	opoiTag  string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
-	ipfsCID  string // optional: IPFS CID from keryx-miner v0.3.0+ (Phase 2 OPoI), empty = not provided
+	block     *appmessage.RPCBlock
+	wireBlock *keryxwire.RpcBlock
+	state     *MiningState
+	noncestr  string
+	nonceVal  uint64
+	opoiTag   string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
+	ipfsCID   string // optional: IPFS CID from keryx-miner v0.3.0+ (Phase 2 OPoI), empty = not provided
+	pomProof  []byte // optional: borsh PomProof from keryx-miner v0.5.4+ (stratum v3), nil = not provided
 }
 
 func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) (*submitInfo, error) {
@@ -112,7 +129,7 @@ func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent)
 		return nil, errors.Wrap(err, "job id is not parsable as an number")
 	}
 	state := GetMiningState(ctx)
-	block, exists := state.GetJob(int(jobId))
+	job, exists := state.GetJob(int(jobId))
 	if !exists {
 		RecordWorkerError(ctx.WalletAddr, ErrMissingJob)
 		return nil, fmt.Errorf("job does not exist. stale?")
@@ -138,12 +155,27 @@ func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent)
 		}
 	}
 
+	// Optional 6th param: hex PoM proof sent by keryx-miner v0.5.4+ (stratum v3)
+	var pomProof []byte
+	if len(event.Params) >= 6 {
+		if proofHex, ok := event.Params[5].(string); ok && proofHex != "" {
+			decoded, err := hex.DecodeString(proofHex)
+			if err != nil || len(decoded) < pomProofMinLen {
+				RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
+				return nil, fmt.Errorf("malformed PoM proof in submit")
+			}
+			pomProof = decoded
+		}
+	}
+
 	return &submitInfo{
-		state:    state,
-		block:    block,
-		noncestr: strings.Replace(noncestr, "0x", "", 1),
-		opoiTag:  opoiTag,
-		ipfsCID:  ipfsCID,
+		state:     state,
+		block:     job.App,
+		wireBlock: job.Wire,
+		noncestr:  strings.Replace(noncestr, "0x", "", 1),
+		opoiTag:   opoiTag,
+		ipfsCID:   ipfsCID,
+		pomProof:  pomProof,
 	}, nil
 }
 
@@ -196,25 +228,6 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	}
 	stats := sh.getCreateStats(ctx)
 
-	converted, err := appmessage.RPCBlockToDomainBlock(submitInfo.block)
-	if err != nil {
-		return fmt.Errorf("failed to cast block to mutable block: %+v", err)
-	}
-	mutableHeader := converted.Header.ToMutable()
-	mutableHeader.SetNonce(submitInfo.nonceVal)
-
-	// KeryxHash PoW verification — replaces Kaspa's pow.NewState which uses
-	// KHeavyHash (no wave_mix, no KERYX_MATRIX_SALT) and would silently drop
-	// every valid Keryx block found by stratum miners.
-	prePowHashBytes, err := SerializeBlockHeader(submitInfo.block)
-	if err != nil {
-		return fmt.Errorf("failed to serialize block header for PoW: %+v", err)
-	}
-	var prePowHash [32]byte
-	copy(prePowHash[:], prePowHashBytes)
-	powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal, uint64(submitInfo.block.Header.DAAScore))
-	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
-
 	// Every share must carry an OPoI tag proving the miner ran tag_fixed(nonce).
 	// No tag = no inference = no mining.
 	if submitInfo.opoiTag == "" {
@@ -258,16 +271,48 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 		}
 	}
 
-	if powValue.Cmp(&target) <= 0 {
-		accepted, err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id)
-		if err != nil {
-			return err
+	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
+	if submitInfo.pomProof != nil {
+		// PoM era: the block's PoW value is the era fold of the walk's final state,
+		// carried in the proof itself. kHeavyHash means nothing here; the node
+		// re-walks the proof and is the final arbiter.
+		powValue := pomProofPowValue(submitInfo.pomProof)
+		if powValue.Cmp(&target) <= 0 {
+			accepted, err := sh.submitWithProof(ctx, submitInfo, event.Id)
+			if err != nil {
+				return err
+			}
+			if accepted {
+				sh.trackAcceptedCoinbase(submitInfo)
+			}
 		}
-		// Block accepted: register the coinbase's 20% escrow outputs (CSV-locked to the
-		// bridge key) so they are claimed after the challenge window instead of stranded.
-		if accepted && len(converted.Transactions) > 0 {
-			coinbaseTxID := consensushashing.TransactionID(converted.Transactions[0]).String()
-			sh.trackCoinbaseEscrow(coinbaseTxID, uint64(submitInfo.block.Header.DAAScore), submitInfo.block)
+	} else {
+		converted, err := appmessage.RPCBlockToDomainBlock(submitInfo.block)
+		if err != nil {
+			return fmt.Errorf("failed to cast block to mutable block: %+v", err)
+		}
+
+		// KeryxHash PoW verification — replaces Kaspa's pow.NewState which uses
+		// KHeavyHash (no wave_mix, no KERYX_MATRIX_SALT) and would silently drop
+		// every valid Keryx block found by stratum miners.
+		prePowHashBytes, err := SerializeBlockHeader(submitInfo.block)
+		if err != nil {
+			return fmt.Errorf("failed to serialize block header for PoW: %+v", err)
+		}
+		var prePowHash [32]byte
+		copy(prePowHash[:], prePowHashBytes)
+		powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal, uint64(submitInfo.block.Header.DAAScore))
+
+		if powValue.Cmp(&target) <= 0 {
+			accepted, err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id)
+			if err != nil {
+				return err
+			}
+			// Block accepted: register the coinbase's 20% escrow outputs (CSV-locked to the
+			// bridge key) so they are claimed after the challenge window instead of stranded.
+			if accepted {
+				sh.trackAcceptedCoinbase(submitInfo)
+			}
 		}
 	}
 
@@ -320,6 +365,85 @@ func (sh *shareHandler) submit(ctx *gostratum.StratumContext,
 	RecordBlockFound(ctx, block.Header.Nonce(), block.Header.BlueScore(), blockhash.String())
 
 	return true, nil
+}
+
+// pomProofPowValue reads the little-endian 32-byte PoW value the proof binds to the
+// walk's final state.
+func pomProofPowValue(proof []byte) big.Int {
+	le := proof[pomProofPowValueOffset : pomProofPowValueOffset+32]
+	be := make([]byte, 32)
+	for i := range be {
+		be[i] = le[31-i]
+	}
+	value := big.Int{}
+	value.SetBytes(be)
+	return value
+}
+
+// submitWithProof pushes a PoM block to keryxd through the pom-aware client: the
+// stored wire template plus the miner's nonce, proof, and the two header fields the
+// proof binds (final state, tier). Returns (true, nil) when the node accepted it.
+func (sh *shareHandler) submitWithProof(ctx *gostratum.StratumContext, si *submitInfo, eventId any) (bool, error) {
+	block, ok := proto.Clone(si.wireBlock).(*keryxwire.RpcBlock)
+	if !ok || block.Header == nil {
+		return false, fmt.Errorf("failed cloning wire block for submit")
+	}
+	block.Header.Nonce = si.nonceVal
+	block.Header.PomFinalState = binary.LittleEndian.Uint64(
+		si.pomProof[pomProofFinalStateStart : pomProofFinalStateStart+8])
+	block.Header.PomTier = uint32(si.pomProof[0])
+	block.PomProof = si.pomProof
+
+	blockhash := "?"
+	if hashBytes, err := PostPomBlockHash(block); err == nil {
+		blockhash = hex.EncodeToString(hashBytes)
+	}
+
+	response, err := sh.wire.SubmitBlock(block)
+	ctx.Logger.Info(fmt.Sprintf("Submitted block %s", blockhash))
+	rejection := ""
+	if err != nil {
+		rejection = err.Error()
+	} else if response.Error != nil {
+		rejection = response.Error.Message
+	} else if response.RejectReason != keryxwire.SubmitBlockResponseMessage_NONE {
+		rejection = response.RejectReason.String()
+	}
+	if rejection != "" {
+		if strings.Contains(rejection, "ErrDuplicateBlock") {
+			ctx.Logger.Warn("block rejected, stale")
+			sh.getCreateStats(ctx).StaleShares.Add(1)
+			sh.overall.StaleShares.Add(1)
+			RecordStaleShare(ctx)
+			return false, ctx.ReplyStaleShare(eventId)
+		}
+		ctx.Logger.Warn("block rejected: " + rejection)
+		sh.getCreateStats(ctx).InvalidShares.Add(1)
+		sh.overall.InvalidShares.Add(1)
+		RecordInvalidShare(ctx)
+		return false, ctx.ReplyBadShare(eventId)
+	}
+
+	ctx.Logger.Info(fmt.Sprintf("block accepted %s", blockhash))
+	stats := sh.getCreateStats(ctx)
+	stats.BlocksFound.Add(1)
+	sh.overall.BlocksFound.Add(1)
+	RecordBlockFound(ctx, si.nonceVal, si.wireBlock.Header.BlueScore, blockhash)
+	return true, nil
+}
+
+// trackAcceptedCoinbase registers the accepted block's 20% CSV-locked escrow outputs
+// for later claiming.
+func (sh *shareHandler) trackAcceptedCoinbase(si *submitInfo) {
+	if len(si.block.Transactions) == 0 {
+		return
+	}
+	domainTx, err := appmessage.RPCTransactionToDomainTransaction(si.block.Transactions[0])
+	if err != nil {
+		return
+	}
+	coinbaseTxID := consensushashing.TransactionID(domainTx).String()
+	sh.trackCoinbaseEscrow(coinbaseTxID, uint64(si.block.Header.DAAScore), si.block)
 }
 
 // trackCoinbaseEscrow scans the accepted block's coinbase for the bridge's escrow

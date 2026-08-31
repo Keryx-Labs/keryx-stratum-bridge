@@ -155,7 +155,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				return
 			}
 
-			jobId := state.AddJob(template.Block)
+			jobId := state.AddJob(&BlockJob{App: template.Block, Wire: template.Wire})
 			if !state.initialized {
 				state.initialized = true
 				state.useBigJob = bigJobRegex.MatchString(client.RemoteApp)
@@ -184,6 +184,11 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				// the salt-v4 era, which sits below the PoM activation height — it would never
 				// switch to PoM and would fork at H.
 				jobParams = append(jobParams, uint64(template.Block.Header.DAAScore))
+				// v3 clients also receive the template bits (5th param) so the miner can
+				// bound its effective target by the real block target.
+				if client.StratumV3 {
+					jobParams = append(jobParams, uint32(template.Block.Header.Bits))
+				}
 			}
 
 			// If the block template carries a pending AiRequest, dispatch it only to miners

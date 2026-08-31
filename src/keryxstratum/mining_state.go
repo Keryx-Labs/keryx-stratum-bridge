@@ -7,12 +7,21 @@ import (
 
 	"github.com/kaspanet/kaspad/app/appmessage"
 	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc/keryxwire"
 )
 
 const maxjobs = 32
 
+// BlockJob keeps both views of a template: the appmessage projection feeds the
+// existing serialization/scanning helpers, the keryxwire original is what goes
+// back to the node on submit (it carries the Keryx-only header fields).
+type BlockJob struct {
+	App  *appmessage.RPCBlock
+	Wire *keryxwire.RpcBlock
+}
+
 type MiningState struct {
-	Jobs        map[int]*appmessage.RPCBlock
+	Jobs        map[int]*BlockJob
 	JobLock     sync.Mutex
 	jobCounter  int
 	bigDiff     big.Int
@@ -40,7 +49,7 @@ type MiningState struct {
 
 func MiningStateGenerator() any {
 	return &MiningState{
-		Jobs:        map[int]*appmessage.RPCBlock{},
+		Jobs:        map[int]*BlockJob{},
 		JobLock:     sync.Mutex{},
 		connectTime: time.Now(),
 	}
@@ -50,7 +59,7 @@ func GetMiningState(ctx *gostratum.StratumContext) *MiningState {
 	return ctx.State.(*MiningState)
 }
 
-func (ms *MiningState) AddJob(job *appmessage.RPCBlock) int {
+func (ms *MiningState) AddJob(job *BlockJob) int {
 	ms.jobCounter++
 	idx := ms.jobCounter
 	ms.JobLock.Lock()
@@ -59,7 +68,7 @@ func (ms *MiningState) AddJob(job *appmessage.RPCBlock) int {
 	return idx
 }
 
-func (ms *MiningState) GetJob(id int) (*appmessage.RPCBlock, bool) {
+func (ms *MiningState) GetJob(id int) (*BlockJob, bool) {
 	ms.JobLock.Lock()
 	job, exists := ms.Jobs[id%maxjobs]
 	ms.JobLock.Unlock()

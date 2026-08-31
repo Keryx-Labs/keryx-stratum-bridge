@@ -27,6 +27,9 @@ type StratumContext struct {
 	State         any // gross, but go generics aren't mature enough this can be typed 😭
 	writeLock     int32
 	Extranonce    string
+	// StratumV3 is set when the miner declares the "keryx-stratum-v3" capability in
+	// mining.subscribe: notify carries bits and submit may carry a PoM proof.
+	StratumV3 bool
 }
 
 type ContextSummary struct {

@@ -102,7 +102,7 @@ func ListenAndServe(cfg BridgeConfig) error {
 		})
 		go http.ListenAndServe(cfg.HealthCheckPort, nil)
 	}
-	shareHandler := newShareHandler(ksApi.keryxd, cfg.IPFSAPIUrl, escrowStore)
+	shareHandler := newShareHandler(ksApi.keryxd, ksApi.wire, cfg.IPFSAPIUrl, escrowStore)
 	minDiff := cfg.MinShareDiff
 	if minDiff < 1 {
 		minDiff = 1

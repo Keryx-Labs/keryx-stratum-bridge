@@ -17,7 +17,12 @@ const (
 	StratumMethodSubscribe StratumMethod = "mining.subscribe"
 	StratumMethodAuthorize StratumMethod = "mining.authorize"
 	StratumMethodSubmit    StratumMethod = "mining.submit"
+	StratumMethodKeepalive StratumMethod = "mining.keepalive"
 )
+
+// StratumV3Capability is the mining.subscribe second parameter sent by keryx-miner
+// v0.5.4+ to negotiate the v3 protocol (notify with bits, PoM submit, keepalive).
+const StratumV3Capability = "keryx-stratum-v3"
 
 func DefaultLogger() *zap.Logger {
 	cfg := zap.NewDevelopmentEncoderConfig()
@@ -43,7 +48,14 @@ func DefaultHandlers() StratumHandlerMap {
 		string(StratumMethodSubscribe): HandleSubscribe,
 		string(StratumMethodAuthorize): HandleAuthorize,
 		string(StratumMethodSubmit):    HandleSubmit,
+		string(StratumMethodKeepalive): HandleKeepalive,
 	}
+}
+
+// HandleKeepalive acknowledges a mining.keepalive. The miner treats a missing or
+// non-true reply as a dead connection and reconnects, so always answer true.
+func HandleKeepalive(ctx *StratumContext, event JsonRpcEvent) error {
+	return ctx.Reply(NewResponse(event, true, nil))
 }
 
 func HandleAuthorize(ctx *StratumContext, event JsonRpcEvent) error {
@@ -90,6 +102,11 @@ func HandleSubscribe(ctx *StratumContext, event JsonRpcEvent) error {
 		app, ok := event.Params[0].(string)
 		if ok {
 			ctx.RemoteApp = app
+		}
+	}
+	if len(event.Params) > 1 {
+		if capability, ok := event.Params[1].(string); ok && capability == StratumV3Capability {
+			ctx.StratumV3 = true
 		}
 	}
 

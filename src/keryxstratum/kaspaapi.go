@@ -11,15 +11,27 @@ import (
 	"github.com/kaspanet/kaspad/app/appmessage"
 	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
 	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc"
+	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxrpc/keryxwire"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
+
+// BlockTemplate pairs the canonical keryxwire template (round-tripped to the node on
+// submit, keeps the Keryx-only header fields) with its appmessage projection used by
+// the bridge's serialization and scanning helpers.
+type BlockTemplate struct {
+	Block    *appmessage.RPCBlock
+	Wire     *keryxwire.RpcBlock
+	IsSynced bool
+}
 
 type KeryxApi struct {
 	address       string
 	blockWaitTime time.Duration
 	logger        *zap.SugaredLogger
 	keryxd        *rpcclient.RPCClient
+	wire          *keryxrpc.Client
 	connected     bool
 	// escrowPubKey is the 64-hex Schnorr pubkey embedded in the coinbase as /escrow:<pk>.
 	// It tells the node to route the 20% escrow cut to a CSV-locked output (claimable after
@@ -38,6 +50,7 @@ func NewKeryxAPI(address string, blockWaitTime time.Duration, logger *zap.Sugare
 		blockWaitTime: blockWaitTime,
 		logger:        logger.With(zap.String("component", "keryxapi:"+address)),
 		keryxd:        client,
+		wire:          keryxrpc.NewClient(address),
 		connected:     true,
 	}, nil
 }
@@ -137,7 +150,7 @@ func (s *KeryxApi) startBlockTemplateListener(ctx context.Context, blockReadyCb 
 }
 
 func (ks *KeryxApi) GetBlockTemplate(
-	client *gostratum.StratumContext) (*appmessage.GetBlockTemplateResponseMessage, error) {
+	client *gostratum.StratumContext) (*BlockTemplate, error) {
 	// OPoI: the node verifies the coinbase tag with verify_tag_fixed(nonce), so the
 	// extra_data must carry "/{nonce_hex16}/ai:v1:{tag_fixed(nonce)}" — exactly like the
 	// solo miner (keryx-miner/src/client/grpc.rs). A random tag without the nonce prefix
@@ -161,10 +174,24 @@ func (ks *KeryxApi) GetBlockTemplate(
 	if models := GetMiningState(client).DeclaredModels(); len(models) > 0 {
 		capPart = "/ai:cap:" + strings.Join(models, ",")
 	}
-	template, err := ks.keryxd.GetBlockTemplate(client.WalletAddr,
+	// The template MUST come from the pom-aware client: the upstream kaspad types drop
+	// the Keryx-only header fields, and a submitted header missing them is invalid.
+	template, err := ks.wire.GetBlockTemplate(client.WalletAddr,
 		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s%s`, client.RemoteApp, version, opoiTag, capPart))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed fetching new block template from keryx")
 	}
-	return template, nil
+	if template.Block == nil {
+		return nil, errors.New("keryx returned an empty block template")
+	}
+	return &BlockTemplate{
+		Block:    keryxrpc.BlockToAppMessage(template.Block),
+		Wire:     template.Block,
+		IsSynced: template.IsSynced,
+	}, nil
+}
+
+// SubmitBlock pushes a solved block through the pom-aware client.
+func (ks *KeryxApi) SubmitBlock(block *keryxwire.RpcBlock) (*keryxwire.SubmitBlockResponseMessage, error) {
+	return ks.wire.SubmitBlock(block)
 }
