@@ -111,6 +111,7 @@ type submitInfo struct {
 	opoiTag   string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
 	ipfsCID   string // optional: IPFS CID from keryx-miner v0.3.0+ (Phase 2 OPoI), empty = not provided
 	pomProof  []byte // optional: borsh PomProof from keryx-miner v0.5.4+ (stratum v3), nil = not provided
+	taskRoot  string // optional: block task root of the GPU that found the share (stratum v4)
 }
 
 func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) (*submitInfo, error) {
@@ -168,7 +169,20 @@ func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent)
 		}
 	}
 
+	// Optional 7th param: hex block task root (stratum v4)
+	var taskRoot string
+	if len(event.Params) >= 7 {
+		if root, ok := event.Params[6].(string); ok {
+			if decoded, err := hex.DecodeString(root); err != nil || len(decoded) != 32 {
+				RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
+				return nil, fmt.Errorf("malformed task root in submit")
+			}
+			taskRoot = root
+		}
+	}
+
 	return &submitInfo{
+		taskRoot:  taskRoot,
 		state:     state,
 		block:     job.App,
 		wireBlock: job.Wire,
@@ -269,6 +283,14 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 				sh.trackEscrow(ctx, submitInfo.block, task, daaScore)
 			}
 		}
+	}
+
+	if blockTaskActive(uint64(submitInfo.block.Header.DAAScore)) && submitInfo.taskRoot == "" {
+		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
+		sh.getCreateStats(ctx).InvalidShares.Add(1)
+		sh.overall.InvalidShares.Add(1)
+		RecordInvalidShare(ctx)
+		return ctx.Reply(gostratum.JsonRpcResponse{Id: event.Id, Result: nil, Error: []any{47, "task root required", nil}})
 	}
 
 	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
@@ -392,6 +414,7 @@ func (sh *shareHandler) submitWithProof(ctx *gostratum.StratumContext, si *submi
 	block.Header.PomFinalState = binary.LittleEndian.Uint64(
 		si.pomProof[pomProofFinalStateStart : pomProofFinalStateStart+8])
 	block.Header.PomTier = uint32(si.pomProof[0])
+	block.Header.TaskRoot = si.taskRoot
 	block.PomProof = si.pomProof
 
 	blockhash := "?"
@@ -514,6 +537,10 @@ func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext,
 			ctx.Logger.Warn("OPoI declare_capabilities: unknown model_id rejected",
 				zap.String("model_id", id[:8]),
 				zap.String("miner", ctx.WalletAddr))
+			continue
+		}
+		if skipModelIPFSCheck {
+			models = append(models, id)
 			continue
 		}
 		if err := verifyModelOnIPFS(id, sh.ipfsAPIURL); err != nil {

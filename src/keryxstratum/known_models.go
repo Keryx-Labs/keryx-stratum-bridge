@@ -16,7 +16,7 @@ type modelSpec struct {
 }
 
 // knownModelRegistry maps model_id hex to its spec.
-// Ported from keryx-miner/src/models.rs — the five-tier lineup active since H6.
+// Ported from keryx-miner/src/models.rs — the five-tier lineup active since H6, plus the H14 tier 3.
 // model_id hex = base58decode(weightCID)[2..34].
 var knownModelRegistry = map[string]modelSpec{
 	"bd34568cd89f5f19c6c3a6e1a61b929bc868709409eaad8e672d85f3c1eb5710": {
@@ -35,6 +35,10 @@ var knownModelRegistry = map[string]modelSpec{
 		name:      "qwen3.6-27b",
 		weightCID: "QmamoYQGGAkBaqiWuNmwxeC9AQnt9F7sLyX57VoqbJWeUV",
 	},
+	"73740b443bdc00afda5fa34eb9999d3fea77dcc3f6de238fab701394cdc96fb3": {
+		name:      "qwen3.8-27b",
+		weightCID: "QmW7LDz7ZTfw9vpAR9jMhFHWriLhxh728Kihp7oTSLgvyg",
+	},
 	"3dc09358ad75c6ef0c9c86ee4f47c4d6acda961fecbd0e4f9cf55e8f0fdffddb": {
 		name:      "kimi-linear-48b",
 		weightCID: "QmSVhtoNrL8bWJXZuEXMMWqty8qHScQMRuacuoa9ujsYqp",
@@ -42,6 +46,9 @@ var knownModelRegistry = map[string]modelSpec{
 }
 
 var ipfsStatClient = &http.Client{Timeout: 10 * time.Second}
+
+// skipModelIPFSCheck accepts declared models without the IPFS weight check (test networks).
+var skipModelIPFSCheck bool
 
 // isKnownModel reports whether the hex model_id is in the on-chain registry.
 func isKnownModel(modelIDHex string) bool {

@@ -173,7 +173,22 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}
 
 			jobParams := []any{fmt.Sprintf("%d", jobId)}
-			if state.useBigJob {
+			if blockTaskActive(uint64(template.Block.Header.DAAScore)) {
+				// v4: full header and window seed; each GPU of the worker inserts its own task root.
+				seed, err := kapi.seeds.windowSeed(template.Wire.Header)
+				if err != nil {
+					RecordWorkerError(client.WalletAddr, ErrFailedBlockFetch)
+					client.Logger.Error(fmt.Sprintf("block task window seed: %s", err))
+					return
+				}
+				headerHex, err := v4JobHeader(template.Wire.Header)
+				if err != nil {
+					client.Logger.Error(fmt.Sprintf("failed encoding v4 job header: %s", err))
+					return
+				}
+				jobParams = append(jobParams, headerHex, template.Block.Header.Timestamp,
+					uint64(template.Block.Header.DAAScore), uint32(template.Block.Header.Bits), seed)
+			} else if state.useBigJob {
 				jobParams = append(jobParams, GenerateLargeJobParams(header, uint64(template.Block.Header.Timestamp)))
 			} else {
 				jobParams = append(jobParams, GenerateJobHeader(header))
@@ -193,7 +208,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 
 			// If the block template carries a pending AiRequest, dispatch it only to miners
 			// that have declared the required model via mining.declare_capabilities.
-			if task := scanBlockForAiTask(template.Block); task != nil {
+			if task := scanBlockForAiTask(template.Block); task != nil && !blockTaskActive(uint64(template.Block.Header.DAAScore)) {
 				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob && state.HasDeclaredModel(task.ModelIDHex) {
 					// DAA already appended above; add only the task JSON → MiningNotifyWithTask (5 params).
 					jobParams = append(jobParams, taskJSON)

@@ -170,6 +170,31 @@ func (c *Client) SubmitBlock(block *keryxwire.RpcBlock) (*keryxwire.SubmitBlockR
 	return response.SubmitBlockResponse, nil
 }
 
+func (c *Client) GetBlock(hash string, includeTransactions bool) (*keryxwire.RpcBlock, error) {
+	msg, err := c.roundTrip(&keryxwire.KaspadMessage{
+		Payload: &keryxwire.KaspadMessage_GetBlockRequest{
+			GetBlockRequest: &keryxwire.GetBlockRequestMessage{
+				Hash:                hash,
+				IncludeTransactions: includeTransactions,
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	response, ok := msg.Payload.(*keryxwire.KaspadMessage_GetBlockResponse)
+	if !ok {
+		return nil, fmt.Errorf("unexpected response type %T to getBlock", msg.Payload)
+	}
+	if response.GetBlockResponse.Error != nil {
+		return nil, fmt.Errorf("getBlock error: %s", response.GetBlockResponse.Error.Message)
+	}
+	if response.GetBlockResponse.Block == nil {
+		return nil, fmt.Errorf("getBlock returned no block for %s", hash)
+	}
+	return response.GetBlockResponse.Block, nil
+}
+
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

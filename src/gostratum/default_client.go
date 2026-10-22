@@ -127,10 +127,10 @@ func SendExtranonce(ctx *StratumContext) {
 	}
 }
 
-var walletRegex = regexp.MustCompile("keryx:[a-z0-9]+")
+var walletRegex = regexp.MustCompile("(keryx|keryxtest):[a-z0-9]+")
 
 func CleanWallet(in string) (string, error) {
-	if !strings.HasPrefix(in, "keryx:") {
+	if !strings.HasPrefix(in, "keryx:") && !strings.HasPrefix(in, "keryxtest:") {
 		return CleanWallet("keryx:" + in)
 	}
 	if match := walletRegex.FindString(in); match != "" {

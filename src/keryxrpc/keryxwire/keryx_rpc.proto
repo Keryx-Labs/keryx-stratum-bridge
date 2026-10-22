@@ -55,6 +55,8 @@ message RpcBlockHeader {
   // H6: the winning walk's proven PoM tier, committed into the block hash. Filled on
   // submit_block from the GPU that solved the block, exactly like pomFinalState.
   uint32 pomTier = 18;
+  // Block task: root of the window's task trace, set by the miner (hex; empty below the gate).
+  string taskRoot = 19;
 }
 
 message RpcBlockLevelParents {

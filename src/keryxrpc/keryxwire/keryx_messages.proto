@@ -15,5 +15,7 @@ message KaspadMessage {
     SubmitBlockResponseMessage submitBlockResponse = 1004;
     GetBlockTemplateRequestMessage getBlockTemplateRequest = 1005;
     GetBlockTemplateResponseMessage getBlockTemplateResponse = 1006;
+    GetBlockRequestMessage getBlockRequest = 1025;
+    GetBlockResponseMessage getBlockResponse = 1026;
   }
 }

@@ -18,6 +18,7 @@ const maxjobs = 32
 type BlockJob struct {
 	App  *appmessage.RPCBlock
 	Wire *keryxwire.RpcBlock
+	id   int
 }
 
 type MiningState struct {
@@ -62,6 +63,7 @@ func GetMiningState(ctx *gostratum.StratumContext) *MiningState {
 func (ms *MiningState) AddJob(job *BlockJob) int {
 	ms.jobCounter++
 	idx := ms.jobCounter
+	job.id = idx
 	ms.JobLock.Lock()
 	ms.Jobs[idx%maxjobs] = job
 	ms.JobLock.Unlock()
@@ -72,6 +74,9 @@ func (ms *MiningState) GetJob(id int) (*BlockJob, bool) {
 	ms.JobLock.Lock()
 	job, exists := ms.Jobs[id%maxjobs]
 	ms.JobLock.Unlock()
+	if exists && job.id != id {
+		return nil, false
+	}
 	return job, exists
 }
 

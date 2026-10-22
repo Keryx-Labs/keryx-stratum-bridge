@@ -47,6 +47,12 @@ type BridgeConfig struct {
 	// dodge holding" loophole. 0 (default) disables the gate. Self-binding on the payout address,
 	// so it can't be gamed by pointing at someone else's balance.
 	MinHoldingKRX float64 `yaml:"min_holding_krx"`
+	// BlockTaskActivationDAA is the node's block task gate (H15). 0 = not scheduled.
+	BlockTaskActivationDAA uint64 `yaml:"block_task_activation_daa"`
+	// MineWhenNotSynced serves work from a node that reports itself unsynced (test networks).
+	MineWhenNotSynced bool `yaml:"mine_when_not_synced"`
+	// SkipModelIPFSCheck accepts declared models without the IPFS weight check (test networks).
+	SkipModelIPFSCheck bool `yaml:"skip_model_ipfs_check"`
 }
 
 func configureZap(cfg BridgeConfig) (*zap.SugaredLogger, func()) {
@@ -99,6 +105,12 @@ func ListenAndServe(cfg BridgeConfig) error {
 	}
 	// H6 delegation cert (/esig:) binding the escrow key to the single payout address.
 	ksApi.escrowCert = cfg.EscrowCert
+	ksApi.mineWhenNotSynced = cfg.MineWhenNotSynced
+	skipModelIPFSCheck = cfg.SkipModelIPFSCheck
+	if cfg.BlockTaskActivationDAA > 0 {
+		blockTaskActivationDAA = cfg.BlockTaskActivationDAA
+		logger.Infof("block task gate at daa %d", blockTaskActivationDAA)
+	}
 	if cfg.EscrowCert == "" {
 		logger.Warn("no escrow_cert configured — the node rejects every template past H6 (mining requires an escrow delegation)")
 	}

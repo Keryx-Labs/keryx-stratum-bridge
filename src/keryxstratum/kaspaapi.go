@@ -40,6 +40,10 @@ type KeryxApi struct {
 	// escrowCert is the 128-hex delegation cert embedded as /esig:<cert>. From H6 the node
 	// rejects a template without a valid /escrow + /esig pair. Empty = no cert available.
 	escrowCert string
+	// seeds resolves the block task window seed of each template.
+	seeds *seedResolver
+	// mineWhenNotSynced serves work from a node that reports itself unsynced (test networks).
+	mineWhenNotSynced bool
 }
 
 func NewKeryxAPI(address string, blockWaitTime time.Duration, logger *zap.SugaredLogger) (*KeryxApi, error) {
@@ -48,14 +52,16 @@ func NewKeryxAPI(address string, blockWaitTime time.Duration, logger *zap.Sugare
 		return nil, err
 	}
 
-	return &KeryxApi{
+	api := &KeryxApi{
 		address:       address,
 		blockWaitTime: blockWaitTime,
 		logger:        logger.With(zap.String("component", "keryxapi:"+address)),
 		keryxd:        client,
 		wire:          keryxrpc.NewClient(address),
 		connected:     true,
-	}, nil
+	}
+	api.seeds = newSeedResolver(api.wire)
+	return api, nil
 }
 
 func (ks *KeryxApi) Start(ctx context.Context, blockCb func()) {
@@ -109,7 +115,7 @@ func (s *KeryxApi) waitForSync(verbose bool) error {
 		if err != nil {
 			return errors.Wrapf(err, "error fetching server info from keryxd @ %s", s.address)
 		}
-		if clientInfo.IsSynced {
+		if clientInfo.IsSynced || s.mineWhenNotSynced {
 			break
 		}
 		s.logger.Warn("Keryx is not synced, waiting for sync before starting bridge")
