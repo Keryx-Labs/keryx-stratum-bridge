@@ -1,21 +1,19 @@
-FROM golang:1.19.1 as builder
-
-LABEL org.opencontainers.image.description="Dockerized Keryx Stratum Bridge"
-LABEL org.opencontainers.image.authors="keryx-labs"
-LABEL org.opencontainers.image.source="https://github.com/keryx-labs/keryx-stratum-bridge"
-
-WORKDIR /go/src/app
-ADD go.mod .
-ADD go.sum .
+FROM golang:1.26.11-bookworm AS go-builder
+WORKDIR /build
+COPY go.mod go.sum ./
 RUN go mod download
+COPY cmd ./cmd
+COPY src ./src
+RUN go build -mod=readonly -trimpath -o /out/keryxbridge ./cmd/keryxbridge
 
-ADD . .
-RUN go build -o /go/bin/app ./cmd/keryxbridge
+FROM rust:1.96.1-bookworm AS rust-builder
+WORKDIR /build
+COPY verifier ./verifier
+RUN cargo build --release --locked --manifest-path verifier/Cargo.toml
 
-
-FROM gcr.io/distroless/base:nonroot
-COPY --from=builder /go/bin/app /
-COPY cmd/keryxbridge/config.yaml /
-
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=go-builder /out/keryxbridge /bin/keryxbridge
+COPY --from=rust-builder /build/verifier/target/release/keryx-bridge-verifier /bin/keryx-bridge-verifier
+COPY cmd/keryxbridge/config.yaml /config.yaml
 WORKDIR /
-ENTRYPOINT ["/app"]
+ENTRYPOINT ["/bin/keryxbridge", "-config", "/config.yaml"]

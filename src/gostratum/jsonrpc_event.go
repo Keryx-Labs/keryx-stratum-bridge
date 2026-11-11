@@ -1,6 +1,11 @@
 package gostratum
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+)
 
 type JsonRpcEvent struct {
 	Id      any           `json:"id"` // id can be nil, a string, or an int 🙄
@@ -41,8 +46,14 @@ func NewResponse(event JsonRpcEvent, results any, err []any) JsonRpcResponse {
 
 func UnmarshalEvent(in string) (JsonRpcEvent, error) {
 	event := JsonRpcEvent{}
-	if err := json.Unmarshal([]byte(in), &event); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(in))
+	decoder.UseNumber()
+	if err := decoder.Decode(&event); err != nil {
 		return JsonRpcEvent{}, err
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return JsonRpcEvent{}, fmt.Errorf("multiple or malformed JSON values in frame")
 	}
 	return event, nil
 }

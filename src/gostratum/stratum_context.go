@@ -22,7 +22,10 @@ type StratumContext struct {
 	Id            int32
 	Logger        *zap.Logger
 	connection    net.Conn
-	disconnecting bool
+	done          chan struct{}
+	disconnected  int32
+	authorized    int32
+	Secure        bool
 	onDisconnect  chan *StratumContext
 	State         any // gross, but go generics aren't mature enough this can be typed 😭
 	writeLock     int32
@@ -42,8 +45,11 @@ type ContextSummary struct {
 var ErrorDisconnected = fmt.Errorf("disconnecting")
 
 func (sc *StratumContext) Connected() bool {
-	return !sc.disconnecting
+	return atomic.LoadInt32(&sc.disconnected) == 0
 }
+
+func (sc *StratumContext) IsAuthorized() bool { return atomic.LoadInt32(&sc.authorized) == 1 }
+func (sc *StratumContext) MarkAuthorized()    { atomic.StoreInt32(&sc.authorized, 1) }
 
 func (sc *StratumContext) Summary() ContextSummary {
 	return ContextSummary{
@@ -65,16 +71,17 @@ func NewMockContext(ctx context.Context, logger *zap.Logger, state any) (*Stratu
 		RemoteApp:     "mock.context",
 		Logger:        logger,
 		connection:    mc,
+		done:          make(chan struct{}),
 	}, mc
 }
 
 func (sc *StratumContext) String() string {
-	serialized, _ := json.Marshal(sc)
+	serialized, _ := json.Marshal(sc.Summary())
 	return string(serialized)
 }
 
 func (sc *StratumContext) Reply(response JsonRpcResponse) error {
-	if sc.disconnecting {
+	if !sc.Connected() {
 		return ErrorDisconnected
 	}
 	encoded, err := json.Marshal(response)
@@ -86,7 +93,7 @@ func (sc *StratumContext) Reply(response JsonRpcResponse) error {
 }
 
 func (sc *StratumContext) Send(event JsonRpcEvent) error {
-	if sc.disconnecting {
+	if !sc.Connected() {
 		return ErrorDisconnected
 	}
 	encoded, err := json.Marshal(event)
@@ -106,7 +113,10 @@ func (sc *StratumContext) write(data []byte) error {
 		if err := sc.connection.SetWriteDeadline(deadline); err != nil {
 			return errors.Wrap(err, "failed setting write deadline for connection")
 		}
-		_, err := sc.connection.Write(data)
+		n, err := sc.connection.Write(data)
+		if err == nil && n != len(data) {
+			err = fmt.Errorf("short socket write")
+		}
 		sc.checkDisconnect(err)
 		return err
 	}
@@ -164,13 +174,20 @@ func (sc *StratumContext) ReplyLowDiffShare(id any) error {
 }
 
 func (sc *StratumContext) Disconnect() {
-	if !sc.disconnecting {
+	if atomic.CompareAndSwapInt32(&sc.disconnected, 0, 1) {
+		if sc.done != nil {
+			close(sc.done)
+		}
 		sc.Logger.Info("disconnecting")
-		sc.disconnecting = true
 		if sc.connection != nil {
 			sc.connection.Close()
 		}
-		sc.onDisconnect <- sc
+		if sc.onDisconnect != nil {
+			select {
+			case sc.onDisconnect <- sc:
+			case <-sc.parentContext.Done():
+			}
+		}
 	}
 }
 
@@ -186,11 +203,14 @@ func (StratumContext) Deadline() (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (StratumContext) Done() <-chan struct{} {
-	return nil
+func (sc StratumContext) Done() <-chan struct{} {
+	return sc.done
 }
 
-func (StratumContext) Err() error {
+func (sc *StratumContext) Err() error {
+	if !sc.Connected() {
+		return context.Canceled
+	}
 	return nil
 }
 

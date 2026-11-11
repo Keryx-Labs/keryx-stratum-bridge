@@ -22,6 +22,8 @@ type BlockJob struct {
 }
 
 type MiningState struct {
+	dispatchMu  sync.Mutex
+	seen        map[int]map[string]bool
 	Jobs        map[int]*BlockJob
 	JobLock     sync.Mutex
 	jobCounter  int
@@ -61,12 +63,15 @@ func GetMiningState(ctx *gostratum.StratumContext) *MiningState {
 }
 
 func (ms *MiningState) AddJob(job *BlockJob) int {
+	ms.JobLock.Lock()
+	defer ms.JobLock.Unlock()
 	ms.jobCounter++
 	idx := ms.jobCounter
 	job.id = idx
-	ms.JobLock.Lock()
+	if old := ms.Jobs[idx%maxjobs]; old != nil {
+		delete(ms.seen, old.id)
+	}
 	ms.Jobs[idx%maxjobs] = job
-	ms.JobLock.Unlock()
 	return idx
 }
 
@@ -101,4 +106,23 @@ func (ms *MiningState) HasDeclaredModel(modelIDHex string) bool {
 		}
 	}
 	return false
+}
+
+func (ms *MiningState) rememberShare(job int, key string) bool {
+	ms.JobLock.Lock()
+	defer ms.JobLock.Unlock()
+	if current := ms.Jobs[job%maxjobs]; current == nil || current.id != job {
+		return false
+	}
+	if ms.seen == nil {
+		ms.seen = make(map[int]map[string]bool)
+	}
+	if ms.seen[job] == nil {
+		ms.seen[job] = make(map[string]bool)
+	}
+	if ms.seen[job][key] || len(ms.seen[job]) >= 8192 {
+		return false
+	}
+	ms.seen[job][key] = true
+	return true
 }

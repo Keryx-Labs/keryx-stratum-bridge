@@ -76,19 +76,7 @@ func (c *clientListener) OnConnect(ctx *gostratum.StratumContext) {
 	if c.extranonceSize > 0 {
 		ctx.Extranonce = fmt.Sprintf("%0*x", c.extranonceSize*2, extranonce)
 	}
-	go func() {
-		// hacky, but give time for the authorize to go through so we can use the worker name
-		time.Sleep(5 * time.Second)
-		c.shareHandler.getCreateStats(ctx)
-	}()
-	go func() {
-		// Wait for authorize to complete, then immediately challenge the new miner.
-		// No grace period: no inference = no mining.
-		time.Sleep(10 * time.Second)
-		if ctx.Connected() && ctx.WalletAddr != "" {
-			c.sendChallengeToClient(ctx)
-		}
-	}()
+
 }
 
 func (c *clientListener) OnDisconnect(ctx *gostratum.StratumContext) {
@@ -98,18 +86,24 @@ func (c *clientListener) OnDisconnect(ctx *gostratum.StratumContext) {
 	delete(c.clients, ctx.Id)
 	c.logger.Info("removed client ", ctx.Id)
 	c.clientLock.Unlock()
-	RecordDisconnect(ctx)
+	if ctx.IsAuthorized() {
+		RecordDisconnect(ctx)
+	}
 }
 
 func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 	c.clientLock.Lock()
 	addresses := make([]string, 0, len(c.clients))
 	for _, cl := range c.clients {
-		if !cl.Connected() {
+		if !cl.Connected() || !cl.IsAuthorized() {
 			continue
 		}
 		go func(client *gostratum.StratumContext) {
 			state := GetMiningState(client)
+			if !state.dispatchMu.TryLock() {
+				return
+			}
+			defer state.dispatchMu.Unlock()
 			if client.WalletAddr == "" {
 				if time.Since(state.connectTime) > time.Second*20 {
 					client.Logger.Warn("client misconfigured, no miner address specified - disconnecting", zap.String("client", client.String()))
@@ -126,7 +120,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			gated := !state.verified || state.activeChallengeNonce != "" ||
 				(c.minHoldingSompi > 0 && !state.holdsEnough)
 			state.challengeLock.Unlock()
-			if gated {
+			if gated || !c.shareHandler.canMine() {
 				return
 			}
 			template, err := kapi.GetBlockTemplate(client)
@@ -147,6 +141,9 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			for _, rh := range scanBlockForAiChallengeResponseHashes(template.Block) {
 				c.escrowStore.MarkSlashedByResponse(rh)
 			}
+			if !template.IsSynced && !kapi.mineWhenNotSynced {
+				return
+			}
 			state.bigDiff = CalculateTarget(uint64(template.Block.Header.Bits))
 			header, err := SerializeBlockHeader(template.Block)
 			if err != nil {
@@ -156,9 +153,12 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}
 
 			jobId := state.AddJob(&BlockJob{App: template.Block, Wire: template.Wire})
-			if !state.initialized {
-				state.initialized = true
-				state.useBigJob = bigJobRegex.MatchString(client.RemoteApp)
+			state.JobLock.Lock()
+			initialized := state.initialized
+			state.JobLock.Unlock()
+			if !initialized {
+				state.JobLock.Lock()
+				state.useBigJob = false // authenticated H15/H16 clients negotiated Stratum v3
 				state.stratumDiff = newKeryxDiff()
 				state.stratumDiff.setDiffValue(c.minShareDiff)
 				if err := client.Send(gostratum.JsonRpcEvent{
@@ -166,10 +166,13 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 					Method:  "mining.set_difficulty",
 					Params:  []any{state.stratumDiff.diffValue},
 				}); err != nil {
+					state.JobLock.Unlock()
 					RecordWorkerError(client.WalletAddr, ErrFailedSetDiff)
 					client.Logger.Error(errors.Wrap(err, "failed sending difficulty").Error(), zap.Any("context", client))
 					return
 				}
+				state.initialized = true
+				state.JobLock.Unlock()
 			}
 
 			jobParams := []any{fmt.Sprintf("%d", jobId)}
@@ -232,7 +235,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			RecordNewJob(client)
 		}(cl)
 
-		if cl.WalletAddr != "" {
+		if cl.IsAuthorized() {
 			addresses = append(addresses, cl.WalletAddr)
 		}
 	}
@@ -258,7 +261,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 					}
 					c.clientLock.RLock()
 					for _, cl := range c.clients {
-						if cl.WalletAddr == "" {
+						if !cl.IsAuthorized() {
 							continue
 						}
 						ok := bal[cl.WalletAddr] >= c.minHoldingSompi
@@ -302,7 +305,7 @@ func (c *clientListener) sendChallenges() {
 	c.clientLock.RLock()
 	defer c.clientLock.RUnlock()
 	for _, client := range c.clients {
-		if !client.Connected() || client.WalletAddr == "" {
+		if !client.Connected() || !client.IsAuthorized() {
 			continue
 		}
 		go c.sendChallengeToClient(client)
@@ -328,7 +331,7 @@ func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
 	}
 	// Challenge with a random model from those declared — proves the miner has what it claims.
 	var pick [8]byte
-	rand.Read(pick[:]) //nolint:errcheck
+	rand.Read(pick[:]) // crypto/rand fails closed in the supported Go toolchain
 	idx := binary.LittleEndian.Uint64(pick[:]) % uint64(len(state.declaredModels))
 	modelID := state.declaredModels[idx]
 	nonce := make([]byte, 8)
@@ -356,7 +359,11 @@ func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
 
 	// Deadline timer: kick if no response within the deadline window.
 	go func() {
-		time.Sleep(opOIChallengeDeadline)
+		select {
+		case <-time.After(opOIChallengeDeadline):
+		case <-ctx.Done():
+			return
+		}
 		state.challengeLock.Lock()
 		unanswered := state.activeChallengeNonce == nonceHex
 		state.challengeLock.Unlock()

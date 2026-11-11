@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/kaspanet/kaspad/app/appmessage"
 	"github.com/keryx-labs/keryx-stratum-bridge/src/gostratum"
@@ -152,15 +153,15 @@ func InitInvalidCounter(worker *gostratum.StratumContext, errorType string) {
 }
 
 func InitWorkerCounters(worker *gostratum.StratumContext) {
-  labels := commonLabels(worker)
+	labels := commonLabels(worker)
 
 	shareCounter.With(labels).Add(0)
 	shareDiffCounter.With(labels).Add(0)
 
-  errTypes := []string{"stale", "duplicate", "invalid", "weak"}
-  for _, e := range errTypes {
-    InitInvalidCounter(worker, e)
-  }
+	errTypes := []string{"stale", "duplicate", "invalid", "weak"}
+	for _, e := range errTypes {
+		InitInvalidCounter(worker, e)
+	}
 
 	blockCounter.With(labels).Add(0)
 
@@ -228,9 +229,10 @@ func StartPromServer(log *zap.SugaredLogger, port string) {
 	go func() { // prom http handler, separate from the main router
 		promInit.Do(func() {
 			logger := log.With(zap.String("server", "prometheus"))
-			http.Handle("/metrics", promhttp.Handler())
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
 			logger.Info("hosting prom stats on ", port, "/metrics")
-			if err := http.ListenAndServe(port, nil); err != nil {
+			if err := (&http.Server{Addr: port, Handler: mux, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}).ListenAndServe(); err != nil {
 				logger.Error("error serving prom metrics", zap.Error(err))
 			}
 		})

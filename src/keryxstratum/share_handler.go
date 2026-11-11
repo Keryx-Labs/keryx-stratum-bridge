@@ -1,6 +1,7 @@
 package keryxstratum
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -47,15 +48,22 @@ type WorkStats struct {
 }
 
 type shareHandler struct {
-	keryxd              *rpcclient.RPCClient
-	wire                *keryxrpc.Client
-	ipfsAPIURL          string
-	escrowStore         *EscrowStore
-	stats               map[string]*WorkStats
-	statsLock           sync.Mutex
-	overall             WorkStats
-	tipBlueScore        uint64
-	submittedResponses  map[string]bool
+	onCapabilities       func(*gostratum.StratumContext)
+	verifier             *protocolVerifier
+	service              *serviceRelay
+	strikes              *strikeMonitor
+	models               map[string]bool
+	minHoldingSompi      uint64
+	tipLock              sync.Mutex
+	keryxd               *rpcclient.RPCClient
+	wire                 *keryxrpc.Client
+	ipfsAPIURL           string
+	escrowStore          *EscrowStore
+	stats                map[string]*WorkStats
+	statsLock            sync.Mutex
+	overall              WorkStats
+	tipBlueScore         uint64
+	submittedResponses   map[string]bool
 	submittedResponsesMu sync.Mutex
 }
 
@@ -103,94 +111,62 @@ func (sh *shareHandler) getCreateStats(ctx *gostratum.StratumContext) *WorkStats
 }
 
 type submitInfo struct {
-	block     *appmessage.RPCBlock
-	wireBlock *keryxwire.RpcBlock
-	state     *MiningState
-	noncestr  string
-	nonceVal  uint64
-	opoiTag   string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
-	ipfsCID   string // optional: IPFS CID from keryx-miner v0.3.0+ (Phase 2 OPoI), empty = not provided
-	pomProof  []byte // optional: borsh PomProof from keryx-miner v0.5.4+ (stratum v3), nil = not provided
-	taskRoot  string // optional: block task root of the GPU that found the share (stratum v4)
+	provenFinal uint64
+	provenTier  uint32
+	jobID       int
+	block       *appmessage.RPCBlock
+	wireBlock   *keryxwire.RpcBlock
+	state       *MiningState
+	noncestr    string
+	nonceVal    uint64
+	opoiTag     string // optional: 16-char hex tag from keryx-miner v0.2.9+, empty = not provided
+	ipfsCID     string // optional: IPFS CID from keryx-miner v0.3.0+ (Phase 2 OPoI), empty = not provided
+	pomProof    []byte // optional: borsh PomProof from keryx-miner v0.5.4+ (stratum v3), nil = not provided
+	taskRoot    string // optional: block task root of the GPU that found the share (stratum v4)
 }
 
 func validateSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) (*submitInfo, error) {
-	if len(event.Params) < 3 {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		return nil, fmt.Errorf("malformed event, expected at least 2 params")
+	if !ctx.IsAuthorized() || !ctx.StratumV3 {
+		return nil, fmt.Errorf("authorized Stratum v3 session required")
 	}
-	jobIdStr, ok := event.Params[1].(string)
-	if !ok {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		return nil, fmt.Errorf("unexpected type for param 1: %+v", event.Params...)
+	if len(event.Params) != 6 {
+		return nil, fmt.Errorf("H15/H16 submit requires six parameters; block tasks are unscheduled")
 	}
-	jobId, err := strconv.ParseInt(jobIdStr, 10, 0)
-	if err != nil {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		return nil, errors.Wrap(err, "job id is not parsable as an number")
+	params := make([]string, 6)
+	for i := range params {
+		var ok bool
+		params[i], ok = event.Params[i].(string)
+		if !ok {
+			return nil, fmt.Errorf("submit fields must be strings")
+		}
+	}
+	if params[0] != workerLogin(ctx) {
+		return nil, fmt.Errorf("submit worker differs from authorized session")
+	}
+	jobID, err := strconv.Atoi(params[1])
+	if err != nil || jobID <= 0 {
+		return nil, fmt.Errorf("invalid job id")
 	}
 	state := GetMiningState(ctx)
-	job, exists := state.GetJob(int(jobId))
-	if !exists {
-		RecordWorkerError(ctx.WalletAddr, ErrMissingJob)
-		return nil, fmt.Errorf("job does not exist. stale?")
+	job, exists := state.GetJob(jobID)
+	if !exists || job.Wire == nil || job.Wire.Header == nil {
+		return nil, ErrStaleShare
 	}
-	noncestr, ok := event.Params[2].(string)
-	if !ok {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		return nil, fmt.Errorf("unexpected type for param 2: %+v", event.Params...)
+	nonce := strings.TrimPrefix(params[2], "0x")
+	if len(nonce) == 0 || len(nonce) > 16 {
+		return nil, fmt.Errorf("invalid nonce")
 	}
-	// Optional 4th param: OPoI tag sent by keryx-miner v0.2.9+ (backward compatible)
-	var opoiTag string
-	if len(event.Params) >= 4 {
-		if tag, ok := event.Params[3].(string); ok {
-			opoiTag = tag
-		}
+	if params[4] != "" {
+		return nil, fmt.Errorf("use mining.ai_response for signed private inference")
 	}
-
-	// Optional 5th param: IPFS CID sent by keryx-miner v0.3.0+ (Phase 2 OPoI)
-	var ipfsCID string
-	if len(event.Params) >= 5 {
-		if cid, ok := event.Params[4].(string); ok {
-			ipfsCID = cid
-		}
+	if len(params[5]) < 2*pomProofMinLen || len(params[5]) > 2*1024*1024 {
+		return nil, fmt.Errorf("invalid PoM proof size")
 	}
-
-	// Optional 6th param: hex PoM proof sent by keryx-miner v0.5.4+ (stratum v3)
-	var pomProof []byte
-	if len(event.Params) >= 6 {
-		if proofHex, ok := event.Params[5].(string); ok && proofHex != "" {
-			decoded, err := hex.DecodeString(proofHex)
-			if err != nil || len(decoded) < pomProofMinLen {
-				RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-				return nil, fmt.Errorf("malformed PoM proof in submit")
-			}
-			pomProof = decoded
-		}
+	proof, err := hex.DecodeString(params[5])
+	if err != nil {
+		return nil, fmt.Errorf("invalid PoM proof encoding")
 	}
-
-	// Optional 7th param: hex block task root (stratum v4)
-	var taskRoot string
-	if len(event.Params) >= 7 {
-		if root, ok := event.Params[6].(string); ok {
-			if decoded, err := hex.DecodeString(root); err != nil || len(decoded) != 32 {
-				RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-				return nil, fmt.Errorf("malformed task root in submit")
-			}
-			taskRoot = root
-		}
-	}
-
-	return &submitInfo{
-		taskRoot:  taskRoot,
-		state:     state,
-		block:     job.App,
-		wireBlock: job.Wire,
-		noncestr:  strings.Replace(noncestr, "0x", "", 1),
-		opoiTag:   opoiTag,
-		ipfsCID:   ipfsCID,
-		pomProof:  pomProof,
-	}, nil
+	return &submitInfo{state: state, block: job.App, wireBlock: job.Wire, jobID: jobID, noncestr: nonce, opoiTag: params[3], pomProof: proof}, nil
 }
 
 var (
@@ -201,6 +177,8 @@ var (
 const workWindow = 8
 
 func (sh *shareHandler) checkStales(ctx *gostratum.StratumContext, si *submitInfo) error {
+	sh.tipLock.Lock()
+	defer sh.tipLock.Unlock()
 	tip := sh.tipBlueScore
 	if si.block.Header.BlueScore > tip {
 		sh.tipBlueScore = si.block.Header.BlueScore
@@ -213,141 +191,100 @@ func (sh *shareHandler) checkStales(ctx *gostratum.StratumContext, si *submitInf
 	return nil
 }
 
+func (sh *shareHandler) canMine() bool {
+	if sh.verifier == nil || sh.service == nil || sh.strikes == nil || !sh.service.ready() || !sh.verifier.healthy() {
+		return false
+	}
+	standing := sh.strikes.snapshot()
+	return standing.Available && standing.SuspendedUntilDAA <= standing.VirtualDAA
+}
+
 func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
-	submitInfo, err := validateSubmit(ctx, event)
+	si, err := validateSubmit(ctx, event)
 	if err != nil {
-		return err
+		return relayError(ctx, event, 20, "invalid or unauthorized PoM submission")
 	}
-
+	state := si.state
+	state.challengeLock.Lock()
+	gated := !state.verified || state.activeChallengeNonce != "" || (sh.minHoldingSompi > 0 && !state.holdsEnough)
+	state.challengeLock.Unlock()
+	state.JobLock.Lock()
+	initialized := state.initialized
+	diff := state.stratumDiff
+	state.JobLock.Unlock()
+	if gated || !initialized || diff == nil || !sh.canMine() {
+		return relayError(ctx, event, 24, "mining service is not ready")
+	}
 	if ctx.Extranonce != "" {
-		extranonce2Len := 16 - len(ctx.Extranonce)
-		if len(submitInfo.noncestr) <= extranonce2Len {
-			submitInfo.noncestr = ctx.Extranonce + fmt.Sprintf("%0*s", extranonce2Len, submitInfo.noncestr)
+		suffixLen := 16 - len(ctx.Extranonce)
+		if len(si.noncestr) <= suffixLen {
+			si.noncestr = ctx.Extranonce + fmt.Sprintf("%0*s", suffixLen, si.noncestr)
+		}
+		if !strings.HasPrefix(si.noncestr, ctx.Extranonce) {
+			return relayError(ctx, event, 20, "nonce outside assigned prefix")
 		}
 	}
-
-	state := GetMiningState(ctx)
-	if state.useBigJob {
-		submitInfo.nonceVal, err = strconv.ParseUint(submitInfo.noncestr, 16, 64)
+	si.nonceVal, err = strconv.ParseUint(si.noncestr, 16, 64)
+	if err != nil {
+		return relayError(ctx, event, 20, "invalid nonce")
+	}
+	if !verifyOPoITag(si.nonceVal, si.opoiTag) {
+		return ctx.ReplyBadShare(event.Id)
+	}
+	if err = sh.checkStales(ctx, si); err != nil {
+		return ctx.ReplyStaleShare(event.Id)
+	}
+	prePow, err := SerializeBlockHeader(si.block)
+	if err != nil {
+		return ctx.ReplyBadShare(event.Id)
+	}
+	shareTarget := diff.targetValue
+	if shareTarget == nil || shareTarget.Sign() <= 0 || shareTarget.BitLen() > 256 {
+		return ctx.ReplyBadShare(event.Id)
+	}
+	targetBytes := shareTarget.FillBytes(make([]byte, 32))
+	for i := 0; i < 16; i++ {
+		targetBytes[i], targetBytes[31-i] = targetBytes[31-i], targetBytes[i]
+	}
+	proven, err := sh.verifier.call(map[string]any{"op": "proof", "pph": hex.EncodeToString(prePow), "timestamp": uint64(si.wireBlock.Header.Timestamp), "nonce": si.nonceVal, "daa": si.wireBlock.Header.DaaScore, "target_le": hex.EncodeToString(targetBytes), "proof": hex.EncodeToString(si.pomProof)})
+	if err != nil || !state.HasDeclaredModel(proven.Model) {
+		RecordInvalidShare(ctx)
+		sh.getCreateStats(ctx).InvalidShares.Add(1)
+		sh.overall.InvalidShares.Add(1)
+		return ctx.ReplyBadShare(event.Id)
+	}
+	powLE, err := hex.DecodeString(proven.PowLE)
+	if err != nil || len(powLE) != 32 {
+		return ctx.ReplyBadShare(event.Id)
+	}
+	for i := 0; i < 16; i++ {
+		powLE[i], powLE[31-i] = powLE[31-i], powLE[i]
+	}
+	pow := new(big.Int).SetBytes(powLE)
+	if !state.rememberShare(si.jobID, fmt.Sprintf("%016x:%d", si.nonceVal, proven.Tier)) {
+		return ctx.ReplyDupeShare(event.Id)
+	}
+	si.provenFinal = proven.FinalState
+	si.provenTier = proven.Tier
+	blockTarget := CalculateTarget(uint64(si.block.Header.Bits))
+	if pow.Cmp(&blockTarget) <= 0 {
+		accepted, err := sh.submitWithProof(ctx, si, event.Id)
 		if err != nil {
-			RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-			return errors.Wrap(err, "failed parsing noncestr")
+			return err
 		}
-	} else {
-		submitInfo.nonceVal, err = strconv.ParseUint(submitInfo.noncestr, 16, 64)
-		if err != nil {
-			RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-			return errors.Wrap(err, "failed parsing noncestr")
+		if !accepted {
+			return nil
 		}
 	}
 	stats := sh.getCreateStats(ctx)
-
-	// Every share must carry an OPoI tag proving the miner ran tag_fixed(nonce).
-	// No tag = no inference = no mining.
-	if submitInfo.opoiTag == "" {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		ctx.Logger.Warn("OPoI tag missing — no inference = no mining, rejecting share",
-			zap.String("nonce", submitInfo.noncestr),
-			zap.String("miner", ctx.WalletAddr))
-		sh.getCreateStats(ctx).InvalidShares.Add(1)
-		sh.overall.InvalidShares.Add(1)
-		RecordInvalidShare(ctx)
-		return ctx.ReplyBadShare(event.Id)
-	}
-	if !verifyOPoITag(submitInfo.nonceVal, submitInfo.opoiTag) {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		ctx.Logger.Warn("OPoI tag mismatch — miner skipped inference",
-			zap.String("nonce", submitInfo.noncestr),
-			zap.String("expected", tagFixed(submitInfo.nonceVal)),
-			zap.String("got", submitInfo.opoiTag))
-		sh.getCreateStats(ctx).InvalidShares.Add(1)
-		sh.overall.InvalidShares.Add(1)
-		RecordInvalidShare(ctx)
-		return ctx.ReplyBadShare(event.Id)
-	}
-
-	// Miner included an IPFS CID — inference is complete. Publish the AiResponse TX on-chain.
-	if submitInfo.ipfsCID != "" {
-		ctx.Logger.Info("OPoI inference result received",
-			zap.String("cid", submitInfo.ipfsCID),
-			zap.String("miner", ctx.WalletAddr))
-		RecordInferenceResult(ctx)
-		if task := scanBlockForAiTask(submitInfo.block); task != nil {
-			if sh.markResponseSubmitted(task.RequestHash) {
-				ctx.Logger.Info("OPoI AiResponse TX already submitted for this request, skipping duplicate",
-					zap.String("request_hash", truncate(task.RequestHash, 8)),
-					zap.String("miner", ctx.WalletAddr))
-			} else {
-				daaScore := uint64(submitInfo.block.Header.DAAScore)
-				go SubmitAiResponseTX(sh.keryxd, ctx.Logger, task.RequestHash, daaScore, submitInfo.ipfsCID)
-				sh.trackEscrow(ctx, submitInfo.block, task, daaScore)
-			}
-		}
-	}
-
-	if blockTaskActive(uint64(submitInfo.block.Header.DAAScore)) && submitInfo.taskRoot == "" {
-		RecordWorkerError(ctx.WalletAddr, ErrBadDataFromMiner)
-		sh.getCreateStats(ctx).InvalidShares.Add(1)
-		sh.overall.InvalidShares.Add(1)
-		RecordInvalidShare(ctx)
-		return ctx.Reply(gostratum.JsonRpcResponse{Id: event.Id, Result: nil, Error: []any{47, "task root required", nil}})
-	}
-
-	target := CalculateTarget(uint64(submitInfo.block.Header.Bits))
-	if submitInfo.pomProof != nil {
-		// PoM era: the block's PoW value is the era fold of the walk's final state,
-		// carried in the proof itself. kHeavyHash means nothing here; the node
-		// re-walks the proof and is the final arbiter.
-		powValue := pomProofPowValue(submitInfo.pomProof)
-		if powValue.Cmp(&target) <= 0 {
-			accepted, err := sh.submitWithProof(ctx, submitInfo, event.Id)
-			if err != nil {
-				return err
-			}
-			if accepted {
-				sh.trackAcceptedCoinbase(submitInfo)
-			}
-		}
-	} else {
-		converted, err := appmessage.RPCBlockToDomainBlock(submitInfo.block)
-		if err != nil {
-			return fmt.Errorf("failed to cast block to mutable block: %+v", err)
-		}
-
-		// KeryxHash PoW verification — replaces Kaspa's pow.NewState which uses
-		// KHeavyHash (no wave_mix, no KERYX_MATRIX_SALT) and would silently drop
-		// every valid Keryx block found by stratum miners.
-		prePowHashBytes, err := SerializeBlockHeader(submitInfo.block)
-		if err != nil {
-			return fmt.Errorf("failed to serialize block header for PoW: %+v", err)
-		}
-		var prePowHash [32]byte
-		copy(prePowHash[:], prePowHashBytes)
-		powValue := CalculateKeryxPoW(prePowHash, uint64(submitInfo.block.Header.Timestamp), submitInfo.nonceVal, uint64(submitInfo.block.Header.DAAScore))
-
-		if powValue.Cmp(&target) <= 0 {
-			accepted, err := sh.submit(ctx, converted, submitInfo.nonceVal, event.Id)
-			if err != nil {
-				return err
-			}
-			// Block accepted: register the coinbase's 20% escrow outputs (CSV-locked to the
-			// bridge key) so they are claimed after the challenge window instead of stranded.
-			if accepted {
-				sh.trackAcceptedCoinbase(submitInfo)
-			}
-		}
-	}
-
 	stats.SharesFound.Add(1)
-	stats.SharesDiff.Add(state.stratumDiff.hashValue)
+	stats.SharesDiff.Add(diff.hashValue)
+	sh.statsLock.Lock()
 	stats.LastShare = time.Now()
+	sh.statsLock.Unlock()
 	sh.overall.SharesFound.Add(1)
-	RecordShareFound(ctx, state.stratumDiff.hashValue)
-
-	return ctx.Reply(gostratum.JsonRpcResponse{
-		Id:     event.Id,
-		Result: true,
-	})
+	RecordShareFound(ctx, diff.hashValue)
+	return ctx.Reply(gostratum.JsonRpcResponse{Id: event.Id, Result: true})
 }
 
 // submit pushes the block to keryxd. Returns (true, nil) when the node accepted it,
@@ -411,9 +348,8 @@ func (sh *shareHandler) submitWithProof(ctx *gostratum.StratumContext, si *submi
 		return false, fmt.Errorf("failed cloning wire block for submit")
 	}
 	block.Header.Nonce = si.nonceVal
-	block.Header.PomFinalState = binary.LittleEndian.Uint64(
-		si.pomProof[pomProofFinalStateStart : pomProofFinalStateStart+8])
-	block.Header.PomTier = uint32(si.pomProof[0])
+	block.Header.PomFinalState = si.provenFinal
+	block.Header.PomTier = si.provenTier
 	block.Header.TaskRoot = si.taskRoot
 	block.PomProof = si.pomProof
 
@@ -512,6 +448,9 @@ func (sh *shareHandler) startStatsThread() error {
 		str += "\n-------------------------------------------------------------------------------\n"
 		str += fmt.Sprintf("                | %14.14s | %14.14s | %12d | %11s",
 			rateStr, ratioStr, sh.overall.BlocksFound.Load(), time.Since(start).Round(time.Second))
+		if sh.strikes != nil {
+			str += "\n" + sh.strikes.String() + "\n"
+		}
 		str += "\n========================================================== keryx_bridge_" + version + " ===\n"
 		sh.statsLock.Unlock()
 		log.Println(str)
@@ -527,50 +466,43 @@ func GetAverageHashrateGHs(stats *WorkStats) float64 {
 //  1. model_id must be in the known registry (sha2-256 of weight file is the ID by construction)
 //  2. the primary weight CID must be reachable via IPFS block/stat — proves the file exists
 func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
+	if !ctx.IsAuthorized() || len(event.Params) == 0 || len(event.Params) > 16 {
+		return relayError(ctx, event, 24, "authorized model declaration required")
+	}
 	var models []string
+	seen := make(map[string]bool)
 	for _, p := range event.Params {
 		id, ok := p.(string)
-		if !ok || len(id) != 64 {
-			continue
+		if !ok || !sh.models[id] {
+			return relayError(ctx, event, 20, "model is outside the pinned H15/H16 registry")
 		}
-		if !isKnownModel(id) {
-			ctx.Logger.Warn("OPoI declare_capabilities: unknown model_id rejected",
-				zap.String("model_id", id[:8]),
-				zap.String("miner", ctx.WalletAddr))
-			continue
-		}
-		if skipModelIPFSCheck {
+		if !seen[id] {
 			models = append(models, id)
-			continue
+			seen[id] = true
 		}
-		if err := verifyModelOnIPFS(id, sh.ipfsAPIURL); err != nil {
-			ctx.Logger.Warn("OPoI declare_capabilities: weight file not found on IPFS — model not properly downloaded",
-				zap.String("model", modelName(id)),
-				zap.String("miner", ctx.WalletAddr),
-				zap.Error(err))
-			continue
-		}
-		models = append(models, id)
 	}
-	if len(models) == 0 {
-		ctx.Logger.Warn("OPoI declare_capabilities: no valid/verified models — miner will be challenged and kicked")
-		return nil
-	}
+	sort.Strings(models)
 	state := GetMiningState(ctx)
 	state.challengeLock.Lock()
+	if state.verified || state.activeChallengeNonce != "" {
+		state.challengeLock.Unlock()
+		return relayError(ctx, event, 24, "model declaration is immutable after the session challenge")
+	}
 	state.declaredModels = models
 	state.challengeLock.Unlock()
-	ctx.Logger.Info("OPoI declare_capabilities: models verified and accepted",
-		zap.Int("count", len(models)),
-		zap.String("first", modelName(models[0])),
-		zap.String("miner", ctx.WalletAddr))
+	if err := ctx.Reply(gostratum.NewResponse(event, true, nil)); err != nil {
+		return err
+	}
+	if sh.onCapabilities != nil {
+		sh.onCapabilities(ctx)
+	}
 	return nil
 }
 
 // HandleChallengeResponse processes a mining.challenge_response from a pool miner.
 // Params: [model_id_hex, result_text] — result_text is the SLM inference output.
 func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
-	if len(event.Params) < 3 {
+	if !ctx.IsAuthorized() || len(event.Params) != 3 {
 		ctx.Logger.Warn("OPoI challenge_response: malformed event, expected 3 params")
 		return nil
 	}
@@ -582,7 +514,7 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 	state.challengeLock.Lock()
 	defer state.challengeLock.Unlock()
 
-	if state.activeChallengeNonce == "" {
+	if state.activeChallengeNonce == "" || time.Since(state.challengeIssuedAt) > opOIChallengeDeadline {
 		ctx.Logger.Warn("OPoI challenge_response: no active challenge for this miner")
 		return nil
 	}
@@ -610,7 +542,8 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 		return nil
 	}
 
-	if resultText == "" {
+	decoded, decodeErr := base64.StdEncoding.DecodeString(resultText)
+	if decodeErr != nil || len(decoded) == 0 || len(decoded) > 65536 {
 		ctx.Logger.Warn("OPoI challenge_response: empty result — no inference = no mining, disconnecting",
 			zap.String("model", modelIDHex[:8]),
 			zap.String("miner", ctx.WalletAddr))
@@ -619,15 +552,15 @@ func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, e
 		return nil
 	}
 
-	ctx.Logger.Info("OPoI challenge_response: PASSED",
+	ctx.Logger.Info("worker capability liveness response accepted",
 		zap.String("model", modelIDHex[:8]),
 		zap.Int("result_len", len(resultText)),
 		zap.String("miner", ctx.WalletAddr))
 	state.challengePassed = true
-	state.verified = true // unlock job dispatch — inference capability proven
+	state.verified = true // session liveness only; consensus PoM/traces provide the evidence
 	state.activeChallengeNonce = ""
 	RecordOPoIChallengePass(ctx)
-	return nil
+	return ctx.Reply(gostratum.NewResponse(event, true, nil))
 }
 
 // markResponseSubmitted atomically registers a request hash.
