@@ -104,6 +104,26 @@ func newServiceRelay(api *KeryxApi, verifier *protocolVerifier, path string) (*s
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
+	// Older states encoded an empty root path as null. A child path's parent
+	// decodes as an empty slice, so both forms must identify the same commitment.
+	for _, task := range s.state.Tasks {
+		for key, root := range task.PhaseRoots {
+			if !strings.HasSuffix(key, ":null") {
+				continue
+			}
+			canonical := strings.TrimSuffix(key, ":null") + ":[]"
+			if existing, ok := task.PhaseRoots[canonical]; ok && existing != root {
+				return nil, fmt.Errorf("conflicting retained attention root commitments")
+			}
+			task.PhaseRoots[canonical] = root
+			delete(task.PhaseRoots, key)
+		}
+	}
+	for _, pending := range s.state.Pending {
+		if pending.Kind == "opening" && strings.HasSuffix(pending.Digest, ":null") {
+			pending.Digest = strings.TrimSuffix(pending.Digest, ":null") + ":[]"
+		}
+	}
 	return s, nil
 }
 
@@ -495,7 +515,10 @@ func (s *serviceRelay) dispatchLocked() error {
 }
 
 func openingKey(o *w.AwaitedOpeningMessage) string {
-	b, _ := json.Marshal(o.AttentionPath)
+	b := []byte("[]")
+	if len(o.AttentionPath) != 0 {
+		b, _ = json.Marshal(o.AttentionPath)
+	}
 	return o.ResponseTxid + ":" + o.Seed + ":" + string(b)
 }
 

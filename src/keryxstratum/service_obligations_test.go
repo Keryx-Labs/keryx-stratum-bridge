@@ -1,7 +1,10 @@
 package keryxstratum
 
 import (
+	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -68,5 +71,60 @@ func TestNodeObligationsQueryAuditsOfRetainedResponses(t *testing.T) {
 		if len(observed.Openings) != 2 || !slices.Equal(query.ResponseTxids, responseIDs) {
 			t.Fatalf("retained response audits were not queried: response IDs %v, openings %d", query.ResponseTxids, len(observed.Openings))
 		}
+	}
+}
+
+func TestOpeningKeyMatchesRootAndChildParent(t *testing.T) {
+	root := &w.AwaitedOpeningMessage{ResponseTxid: "response", Seed: "seed"}
+	child := &w.AwaitedOpeningMessage{ResponseTxid: "response", Seed: "seed", AttentionPath: []uint64{1}}
+	parent := proto.Clone(child).(*w.AwaitedOpeningMessage)
+	parent.AttentionPath = parent.AttentionPath[:len(parent.AttentionPath)-1]
+	if openingKey(root) != openingKey(parent) {
+		t.Fatalf("first attention phase cannot recover the root commitment: root %s, parent %s", openingKey(root), openingKey(parent))
+	}
+}
+
+func TestRetainedAttentionRootsMigrateWithoutDiscardingCommitments(t *testing.T) {
+	legacy := "response:seed:null"
+	canonical := "response:seed:[]"
+	root := strings.Repeat("a", 64)
+	for _, conflict := range []bool{false, true} {
+		name := "legacy state"
+		if conflict {
+			name = "conflicting commitments"
+		}
+		t.Run(name, func(t *testing.T) {
+			roots := map[string]string{legacy: root}
+			if conflict {
+				roots[canonical] = strings.Repeat("b", 64)
+			}
+			state := relayState{Version: 1, Escrow: "escrow", Identity: "identity",
+				Tasks:   map[string]*relayTask{"request": {PhaseRoots: roots}},
+				Pending: map[string]*relayTX{"opening": {Kind: "opening", Digest: legacy}},
+			}
+			path := filepath.Join(t.TempDir(), "state.json")
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			verifier := &protocolVerifier{identity: verifierResult{Pubkey: "escrow", Identity: "identity"}}
+			relay, err := newServiceRelay(&KeryxApi{address: "127.0.0.1:1"}, verifier, path)
+			if conflict {
+				if err == nil {
+					t.Fatal("ambiguous retained commitments were accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(relay.rpc.Close)
+			if relay.state.Tasks["request"].PhaseRoots[canonical] != root || relay.state.Tasks["request"].PhaseRoots[legacy] != "" || relay.state.Pending["opening"].Digest != canonical {
+				t.Fatal("legacy opening state was lost or changed during migration")
+			}
+		})
 	}
 }
