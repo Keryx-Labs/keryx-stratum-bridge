@@ -1,12 +1,12 @@
 package keryxstratum
 
 import (
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +48,6 @@ type WorkStats struct {
 }
 
 type shareHandler struct {
-	onCapabilities       func(*gostratum.StratumContext)
 	verifier             *protocolVerifier
 	service              *serviceRelay
 	strikes              *strikeMonitor
@@ -206,7 +205,7 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	}
 	state := si.state
 	state.challengeLock.Lock()
-	gated := !state.verified || state.activeChallengeNonce != "" || (sh.minHoldingSompi > 0 && !state.holdsEnough)
+	gated := !state.capabilitiesReady || (sh.minHoldingSompi > 0 && !state.holdsEnough)
 	state.challengeLock.Unlock()
 	state.JobLock.Lock()
 	initialized := state.initialized
@@ -242,14 +241,24 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	if shareTarget == nil || shareTarget.Sign() <= 0 || shareTarget.BitLen() > 256 {
 		return ctx.ReplyBadShare(event.Id)
 	}
-	targetBytes := shareTarget.FillBytes(make([]byte, 32))
+	// A network-valid block must be accepted even when the configured share target
+	// is harder. Official miner effective_target also chooses the larger target.
+	blockTarget := CalculateTarget(uint64(si.block.Header.Bits))
+	verificationTarget := new(big.Int).Set(shareTarget)
+	if blockTarget.Cmp(verificationTarget) > 0 {
+		verificationTarget.Set(&blockTarget)
+	}
+	targetBytes := verificationTarget.FillBytes(make([]byte, 32))
 	for i := 0; i < 16; i++ {
 		targetBytes[i], targetBytes[31-i] = targetBytes[31-i], targetBytes[i]
 	}
 	proven, err := sh.verifier.call(map[string]any{"op": "proof", "pph": hex.EncodeToString(prePow), "timestamp": uint64(si.wireBlock.Header.Timestamp), "nonce": si.nonceVal, "daa": si.wireBlock.Header.DaaScore, "target_le": hex.EncodeToString(targetBytes), "proof": hex.EncodeToString(si.pomProof)})
 	if err != nil || !state.HasDeclaredModel(proven.Model) {
 		RecordInvalidShare(ctx)
-		sh.getCreateStats(ctx).InvalidShares.Add(1)
+		failures := sh.getCreateStats(ctx).InvalidShares.Add(1)
+		if failures <= 3 {
+			ctx.Logger.Warn("PoM proof rejected", zap.Error(err), zap.String("verified_model", proven.Model))
+		}
 		sh.overall.InvalidShares.Add(1)
 		return ctx.ReplyBadShare(event.Id)
 	}
@@ -266,7 +275,6 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	}
 	si.provenFinal = proven.FinalState
 	si.provenTier = proven.Tier
-	blockTarget := CalculateTarget(uint64(si.block.Header.Bits))
 	if pow.Cmp(&blockTarget) <= 0 {
 		accepted, err := sh.submitWithProof(ctx, si, event.Id)
 		if err != nil {
@@ -484,83 +492,21 @@ func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext,
 	sort.Strings(models)
 	state := GetMiningState(ctx)
 	state.challengeLock.Lock()
-	if state.verified || state.activeChallengeNonce != "" {
+	if state.capabilitiesReady {
+		same := slices.Equal(state.declaredModels, models)
 		state.challengeLock.Unlock()
-		return relayError(ctx, event, 24, "model declaration is immutable after the session challenge")
+		if same {
+			return ctx.Reply(gostratum.NewResponse(event, true, nil))
+		}
+		return relayError(ctx, event, 24, "model declaration is immutable for this authenticated session")
 	}
 	state.declaredModels = models
+	state.capabilitiesReady = true
 	state.challengeLock.Unlock()
 	if err := ctx.Reply(gostratum.NewResponse(event, true, nil)); err != nil {
 		return err
 	}
-	if sh.onCapabilities != nil {
-		sh.onCapabilities(ctx)
-	}
 	return nil
-}
-
-// HandleChallengeResponse processes a mining.challenge_response from a pool miner.
-// Params: [model_id_hex, result_text] — result_text is the SLM inference output.
-func (sh *shareHandler) HandleChallengeResponse(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
-	if !ctx.IsAuthorized() || len(event.Params) != 3 {
-		ctx.Logger.Warn("OPoI challenge_response: malformed event, expected 3 params")
-		return nil
-	}
-	modelIDHex, _ := event.Params[0].(string)
-	nonceHex, _ := event.Params[1].(string)
-	resultText, _ := event.Params[2].(string)
-
-	state := GetMiningState(ctx)
-	state.challengeLock.Lock()
-	defer state.challengeLock.Unlock()
-
-	if state.activeChallengeNonce == "" || time.Since(state.challengeIssuedAt) > opOIChallengeDeadline {
-		ctx.Logger.Warn("OPoI challenge_response: no active challenge for this miner")
-		return nil
-	}
-	if modelIDHex != state.activeChallengeModel {
-		ctx.Logger.Warn("OPoI challenge_response: model mismatch",
-			zap.String("expected", state.activeChallengeModel[:8]),
-			zap.String("got", func() string {
-				if len(modelIDHex) >= 8 {
-					return modelIDHex[:8]
-				}
-				return modelIDHex
-			}()))
-		return nil
-	}
-
-	// Anti-replay: the response must echo the exact nonce we issued. A mismatch means a
-	// stale or replayed answer — treat as no valid inference and disconnect.
-	if nonceHex != state.activeChallengeNonce {
-		ctx.Logger.Warn("OPoI challenge_response: nonce mismatch — replay/stale, disconnecting",
-			zap.String("expected", state.activeChallengeNonce),
-			zap.String("got", nonceHex),
-			zap.String("miner", ctx.WalletAddr))
-		state.activeChallengeNonce = ""
-		ctx.Disconnect()
-		return nil
-	}
-
-	decoded, decodeErr := base64.StdEncoding.DecodeString(resultText)
-	if decodeErr != nil || len(decoded) == 0 || len(decoded) > 65536 {
-		ctx.Logger.Warn("OPoI challenge_response: empty result — no inference = no mining, disconnecting",
-			zap.String("model", modelIDHex[:8]),
-			zap.String("miner", ctx.WalletAddr))
-		state.activeChallengeNonce = ""
-		ctx.Disconnect()
-		return nil
-	}
-
-	ctx.Logger.Info("worker capability liveness response accepted",
-		zap.String("model", modelIDHex[:8]),
-		zap.Int("result_len", len(resultText)),
-		zap.String("miner", ctx.WalletAddr))
-	state.challengePassed = true
-	state.verified = true // session liveness only; consensus PoM/traces provide the evidence
-	state.activeChallengeNonce = ""
-	RecordOPoIChallengePass(ctx)
-	return ctx.Reply(gostratum.NewResponse(event, true, nil))
 }
 
 // markResponseSubmitted atomically registers a request hash.

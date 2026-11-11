@@ -158,16 +158,17 @@ func ListenAndServe(cfg BridgeConfig) error {
 	if err != nil {
 		return err
 	}
-	shareHandler.onCapabilities = clientHandler.sendChallengeToClient
 	service.clients = clientHandler
 	shareHandler.service = service
-	monitor := newStrikeMonitor(cfg.RPCServer, verifier.identity.Pubkey, verifier.identity.Identity)
+	monitor := newStrikeMonitor(cfg.RPCServer, verifier.identity.Pubkey, verifier.identity.Identity, func() (bool, error) {
+		info, err := ksApi.keryxd.GetInfo()
+		return err == nil && info.IsSynced, err
+	})
 	shareHandler.strikes = monitor
 	handlers := gostratum.DefaultHandlers()
 	handlers[string(gostratum.StratumMethodAuthorize)] = secureAuthorize(cfg, auth)
 	handlers[string(gostratum.StratumMethodSubmit)] = shareHandler.HandleSubmit
 	handlers["mining.declare_capabilities"] = shareHandler.HandleDeclareCapabilities
-	handlers["mining.challenge_response"] = shareHandler.HandleChallengeResponse
 	handlers["mining.ai_response"] = service.HandleAnswer
 	handlers["mining.ai_opening_result"] = service.HandleOpening
 	for _, method := range []string{"mining.hello", "mining.telemetry"} {
@@ -211,7 +212,6 @@ func ListenAndServe(cfg BridgeConfig) error {
 	if err := ksApi.Start(ctx, func() { clientHandler.NewBlockAvailable(ksApi) }); err != nil {
 		return err
 	}
-	go clientHandler.startChallengeLoop(ctx)
 	if cfg.PrintStats {
 		go shareHandler.startStatsThread()
 	}

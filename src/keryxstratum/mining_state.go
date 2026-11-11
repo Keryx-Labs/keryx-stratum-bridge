@@ -33,16 +33,11 @@ type MiningState struct {
 	connectTime time.Time
 	stratumDiff *keryxDiff
 
-	// OPoI challenge state — guarded by challengeLock
-	challengeLock        sync.Mutex
-	declaredModels       []string // model IDs declared by the miner via mining.declare_capabilities
-	activeChallengeNonce string
-	activeChallengeModel string
-	challengeIssuedAt    time.Time
-	challengePassed      bool
-	// verified flips true the first time the miner passes a capability challenge and
-	// never resets. Until then, no jobs are dispatched: no inference = no mining.
-	verified bool
+	// The model declaration admits jobs, not rewards or inference claims.
+	// Every submitted share still needs a full consensus PoM proof.
+	challengeLock     sync.Mutex
+	declaredModels    []string
+	capabilitiesReady bool
 	// holdsEnough reflects the last balance check of the worker's payout address vs the
 	// configured min-holding threshold. Default false (fail-closed: gated until the first
 	// periodic balance check confirms holdings). Only consulted when minHoldingSompi > 0.

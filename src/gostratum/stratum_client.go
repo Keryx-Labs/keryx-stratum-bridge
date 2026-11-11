@@ -18,6 +18,8 @@ const maxLineSize = 2 * 1024 * 1024
 
 func spawnClientListener(ctx *StratumContext, connection net.Conn, s *StratumListener) error {
 	defer ctx.Disconnect()
+	stop := context.AfterFunc(ctx.parentContext, func() { connection.Close() })
+	defer stop()
 
 	reader := bufio.NewReaderSize(connection, 64*1024)
 	pending := make([]byte, 0, 1024)

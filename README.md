@@ -1,6 +1,6 @@
 # Keryx Stratum bridge — H15/H16 update
 
-Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol. This branch is a **draft update awaiting runtime qualification**; compilation and static checks do not establish mainnet readiness.
+Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol. A bounded Windows/RTX 5080 H16 testnet mining run passed with the official miner and node. This branch remains a **draft awaiting complete inference/audit and deployment qualification**.
 
 Consensus source: [keryx-node a69a1a08](https://github.com/Keryx-Labs/keryx-node/tree/a69a1a08c0e49181eecafd6128695dd0d7c667e3). Wire reference: [keryx-miner v0.6.1 / 4167e409](https://github.com/Keryx-Labs/keryx-miner/tree/4167e409e3217580ca257ca3eb35792260b7e40f). Bridge base: `d9fe31ff91337922c4c593d3717f01f002518a23`.
 
@@ -9,6 +9,7 @@ This bridge serves one explicitly configured payout address and its delegated es
 Changes:
 
 - Verify each H15/H16 PoM v5 share with pinned official consensus code, including the H16 pad parameters, before crediting or submitting it. Reject duplicate, unauthorized, mismatched-model and proof-less submissions.
+- Follow the official miner's difficulty conversion and accept a network-valid block even when the pool share target is harder. PoM job admission does not wait for the legacy soft inference challenge, which the official miner ignores under PoM.
 - Poll node obligations automatically; dispatch `mining.ai_request`, seal/sign `mining.ai_response`, and handle `mining.ai_opening` / `mining.ai_opening_result`. Requests and audits are not enabled manually one by one.
 - Verify trace, residual, recurrent and phased attention opening proofs before signing them. Persist encrypted requests, owning worker identities, signed envelopes and verified attention roots before sending/retrying.
 - Show current and lifetime strikes, suspensions and pending burns by the bridge's escrow key, mapped through its verified payout delegation to the node's service identity. Show unavailable/stale observations explicitly.
@@ -53,7 +54,7 @@ The official miner's referenced Stratum client uses a TCP socket. For remote wor
 - `GET /bridge/pubkey`: public escrow key and delegated service identity.
 - `GET /readyz`: 503 while the node, obligations, verifier or service observations are unavailable.
 
-Prometheus exposes `ks_escrow_service_status{escrow_key,service_identity,field}`. Check `available` and `observed_unix` before interpreting the other gauges. Node penalties belong to the payout-script identity; multiple delegated keys sharing that identity necessarily share its penalty history. Local capability challenges are not consensus strikes or proof of LLM execution.
+Prometheus exposes `ks_escrow_service_status{escrow_key,service_identity,field}`. Check `available` and `observed_unix` before interpreting the other gauges. An unsynced node cannot replace a previous strike observation with an available zero. Node penalties belong to the payout-script identity; multiple delegated keys sharing that identity necessarily share its penalty history. A model declaration admits jobs; full consensus proofs, signed responses and audited openings establish the work.
 
 ## Migration and limits
 

@@ -32,15 +32,16 @@ type escrowStanding struct {
 	Error             string    `json:"error,omitempty"`
 }
 type strikeMonitor struct {
-	mu    sync.RWMutex
-	value escrowStanding
-	rpc   *keryxrpc.Client
+	mu         sync.RWMutex
+	value      escrowStanding
+	rpc        *keryxrpc.Client
+	nodeSynced func() (bool, error)
 }
 
 var escrowStrikeGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{Name: "ks_escrow_service_status", Help: "Node service standing by delegated escrow key and payout identity; missing/stale observations are unavailable."}, []string{"escrow_key", "service_identity", "field"})
 
-func newStrikeMonitor(address, key, identity string) *strikeMonitor {
-	return &strikeMonitor{rpc: keryxrpc.NewClient(address), value: escrowStanding{EscrowKey: key, ServiceIdentity: identity, BurnedSompi: "0"}}
+func newStrikeMonitor(address, key, identity string, nodeSynced func() (bool, error)) *strikeMonitor {
+	return &strikeMonitor{rpc: keryxrpc.NewClient(address), nodeSynced: nodeSynced, value: escrowStanding{EscrowKey: key, ServiceIdentity: identity, BurnedSompi: "0"}}
 }
 
 func (m *strikeMonitor) snapshot() escrowStanding {
@@ -69,6 +70,15 @@ func (m *strikeMonitor) Start(ctx context.Context) {
 	}()
 }
 func (m *strikeMonitor) poll() {
+	if m.nodeSynced == nil {
+		m.unavailable("node sync observation unavailable")
+		return
+	}
+	synced, syncErr := m.nodeSynced()
+	if syncErr != nil || !synced {
+		m.unavailable("node strike observation unavailable: node is not synced")
+		return
+	}
 	r, err := m.rpc.GetServiceStrikes()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -83,6 +93,14 @@ func (m *strikeMonitor) poll() {
 	for field, value := range map[string]float64{"available": boolFloat(v.Available), "consecutive_misses": float64(v.ConsecutiveMisses), "lifetime_strikes": float64(v.LifetimeStrikes), "last_strike_daa": float64(v.LastStrikeDAA), "suspended_until_daa": float64(v.SuspendedUntilDAA), "pending_burns": float64(v.PendingBurns), "burned_claims": float64(v.BurnedClaims), "burned_sompi": sompiFloat(v.BurnedSompi), "observed_unix": float64(v.ObservedUTC.Unix())} {
 		escrowStrikeGauge.WithLabelValues(v.EscrowKey, v.ServiceIdentity, field).Set(value)
 	}
+}
+
+func (m *strikeMonitor) unavailable(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.value.Available = false
+	m.value.Error = reason
+	escrowStrikeGauge.WithLabelValues(m.value.EscrowKey, m.value.ServiceIdentity, "available").Set(0)
 }
 func boolFloat(b bool) float64 {
 	if b {

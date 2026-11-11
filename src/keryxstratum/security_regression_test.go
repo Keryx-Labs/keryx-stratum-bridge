@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,71 @@ func TestEscrowStandingUsesDelegatedIdentity(t *testing.T) {
 	}
 }
 
+func TestUnsyncedNodeCannotReplaceStrikeObservationWithZero(t *testing.T) {
+	m := &strikeMonitor{value: escrowStanding{EscrowKey: "escrow", ServiceIdentity: "identity",
+		ObservedUTC: time.Now().UTC(), Available: true, ConsecutiveMisses: 2, LifetimeStrikes: 7},
+		nodeSynced: func() (bool, error) { return false, nil }}
+	m.poll()
+	v := m.snapshot()
+	if v.Available || v.ConsecutiveMisses != 2 || v.LifetimeStrikes != 7 || v.Error == "" {
+		t.Fatalf("unsynced node overwrote or advertised the previous standing: %+v", v)
+	}
+}
+
+func TestPoMCapabilitiesAdmitJobsWithoutLegacyChallenge(t *testing.T) {
+	const model = "399984045600f7d58d1b2cf01e6a4bf466fa15c7ac31bd0dd1a71e003b617cc6"
+	ctx, conn := gostratum.NewMockContext(context.Background(), zap.NewNop(), MiningStateGenerator())
+	t.Cleanup(func() { conn.Close() })
+	ctx.StratumV3 = true
+	ctx.MarkAuthorized()
+	sh := &shareHandler{models: map[string]bool{model: true}}
+	reply := make(chan []byte, 1)
+	conn.AsyncReadTestDataFromBuffer(func(data []byte) { reply <- data })
+	if err := sh.HandleDeclareCapabilities(ctx, gostratum.NewEvent("1", "mining.declare_capabilities", []any{model})); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reply:
+	case <-time.After(time.Second):
+		t.Fatal("missing model declaration reply")
+	}
+	state := GetMiningState(ctx)
+	if !state.capabilitiesReady || !state.HasDeclaredModel(model) {
+		t.Fatal("official PoM miner would wait for a job behind an ignored legacy challenge")
+	}
+	if sh.canMine() {
+		t.Fatal("a model declaration bypassed verifier, service or strike readiness")
+	}
+	// Official miner periodically repeats the same declaration on a live session.
+	conn.AsyncReadTestDataFromBuffer(func(data []byte) { reply <- data })
+	if err := sh.HandleDeclareCapabilities(ctx, gostratum.NewEvent("2", "mining.declare_capabilities", []any{model})); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case data := <-reply:
+		if !strings.Contains(string(data), `"result":true`) {
+			t.Fatalf("periodic identical declaration was rejected: %s", data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing repeated declaration reply")
+	}
+}
+
+func TestStratumDifficultyMatchesOfficialMinerTargets(t *testing.T) {
+	for _, tc := range []struct {
+		diff   float64
+		target string
+	}{
+		{1, "00000000ffff0000000000000000000000000000000000000000000000000000"},
+		{4, "000000003fffc000000000000000000000000000000000000000000000000000"},
+	} {
+		want, ok := new(big.Int).SetString(tc.target, 16)
+		if !ok || DiffToTarget(tc.diff).Cmp(want) != 0 {
+			t.Fatalf("difficulty %v does not match the official miner target", tc.diff)
+		}
+	}
+}
+
 func TestAuthorizationRejectsCrossPayoutAndWrongToken(t *testing.T) {
 	token := strings.Repeat("test-only-token-", 4)
 	cfg := BridgeConfig{PayoutAddress: "keryx:q"}
@@ -49,6 +115,7 @@ func TestAuthorizationRejectsCrossPayoutAndWrongToken(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, conn := gostratum.NewMockContext(context.Background(), zap.NewNop(), MiningStateGenerator())
+			t.Cleanup(func() { conn.Close() })
 			ctx.StratumV3 = true
 			done := make(chan struct{}, 1)
 			conn.AsyncReadTestDataFromBuffer(func([]byte) { done <- struct{}{} })

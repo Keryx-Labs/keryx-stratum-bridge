@@ -38,7 +38,6 @@ type StratumListenerConfig struct {
 
 type StratumListener struct {
 	StratumListenerConfig
-	shuttingDown      bool
 	disconnectChannel DisconnectChannel
 	stats             StratumStats
 	workerGroup       sync.WaitGroup
@@ -70,8 +69,6 @@ func NewListener(cfg StratumListenerConfig) *StratumListener {
 }
 
 func (s *StratumListener) Listen(ctx context.Context) error {
-	s.shuttingDown = false
-
 	serverContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -85,12 +82,13 @@ func (s *StratumListener) Listen(ctx context.Context) error {
 		server = tls.NewListener(server, s.TLSConfig)
 	}
 
+	s.workerGroup.Add(2)
 	go s.disconnectListener(serverContext)
 	go s.tcpListener(serverContext, server)
 
 	// block here until the context is killed
 	<-ctx.Done() // context cancelled, so kill the server
-	s.shuttingDown = true
+	cancel()
 	server.Close()
 	s.workerGroup.Wait()
 	return context.Canceled
@@ -119,7 +117,12 @@ func (s *StratumListener) newClient(ctx context.Context, connection net.Conn) {
 		s.ClientListener.OnConnect(clientContext)
 	}
 
-	go func() { defer func() { <-s.connectionSlots }(); spawnClientListener(clientContext, connection, s) }()
+	s.workerGroup.Add(1)
+	go func() {
+		defer s.workerGroup.Done()
+		defer func() { <-s.connectionSlots }()
+		spawnClientListener(clientContext, connection, s)
+	}()
 
 }
 
@@ -132,7 +135,6 @@ func (s *StratumListener) HandleEvent(ctx *StratumContext, event JsonRpcEvent) e
 }
 
 func (s *StratumListener) disconnectListener(ctx context.Context) {
-	s.workerGroup.Add(1)
 	defer s.workerGroup.Done()
 	for {
 		select {
@@ -149,13 +151,11 @@ func (s *StratumListener) disconnectListener(ctx context.Context) {
 }
 
 func (s *StratumListener) tcpListener(ctx context.Context, server net.Listener) {
-	s.workerGroup.Add(1)
 	defer s.workerGroup.Done()
 	for { // listen and spin forever
 		connection, err := server.Accept()
 		if err != nil {
-			if s.shuttingDown {
-				s.Logger.Error("stopping listening due to server shutdown")
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			s.Logger.Error("failed to accept incoming connection", zap.Error(err))

@@ -1,5 +1,7 @@
 //! Local, bounded protocol verifier. Secrets never appear in a request or response.
 mod audit;
+#[cfg(test)]
+mod tests;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use keryx_consensus_core::{
     collateral::{
@@ -178,7 +180,7 @@ fn check(r: Request, id: &Identity) -> Result<Value, String> {
                 &target,
                 |s| pom_pow_value_h3(s, &pph),
             )
-            .map_err(|_| "PoM v5 proof verification failed")?;
+            .map_err(|error| format!("PoM v5 proof verification failed: {error:?}"))?;
             Ok(
                 json!({"ok":true,"tier":proof.tier,"model":hex::encode(tier.model_id),"final_state":proof.final_state,"pow_le":hex::encode(proof.pow_value)}),
             )
@@ -307,7 +309,9 @@ fn check(r: Request, id: &Identity) -> Result<Value, String> {
                     return Err("duplicate audit piece".into());
                 }
                 seen |= piece;
-                if let Some(path) = opening::attn_path(&body) && path != r.path {
+                if let Some(path) = opening::attn_path(&body)
+                    && path != r.path
+                {
                     return Err("attention path mismatch".into());
                 }
                 let seed_bytes: [u8; 32] = seed.as_bytes().try_into().unwrap();

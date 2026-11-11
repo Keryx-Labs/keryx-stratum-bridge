@@ -420,7 +420,7 @@ func (s *serviceRelay) workerLocked(owner, model string, busy map[string]bool) *
 		}
 		st := GetMiningState(cl)
 		st.challengeLock.Lock()
-		ok := st.verified && st.activeChallengeNonce == ""
+		ok := st.capabilitiesReady
 		st.challengeLock.Unlock()
 		if !ok || !st.HasDeclaredModel(model) {
 			continue

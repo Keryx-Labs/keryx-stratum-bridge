@@ -1,10 +1,6 @@
 package keryxstratum
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"regexp"
@@ -112,12 +108,9 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				}
 				return
 			}
-			// OPoI gate (Rule #1 — no inference = no mining): withhold all work until the
-			// miner has passed its first capability challenge, and pause job dispatch while
-			// a challenge is in flight. The latter also frees the GPU so the challenge
-			// inference runs uncontended instead of fighting kHeavyHash for the device.
+			// Declarations admit jobs; only full PoM verification admits a share.
 			state.challengeLock.Lock()
-			gated := !state.verified || state.activeChallengeNonce != "" ||
+			gated := !state.capabilitiesReady ||
 				(c.minHoldingSompi > 0 && !state.holdsEnough)
 			state.challengeLock.Unlock()
 			if gated || !c.shareHandler.canMine() {
@@ -137,9 +130,11 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}
 
 			// Update escrow store's DAA view and check for incoming AiChallenge TXs.
-			c.escrowStore.UpdateDAA(uint64(template.Block.Header.DAAScore))
-			for _, rh := range scanBlockForAiChallengeResponseHashes(template.Block) {
-				c.escrowStore.MarkSlashedByResponse(rh)
+			if c.escrowStore != nil {
+				c.escrowStore.UpdateDAA(uint64(template.Block.Header.DAAScore))
+				for _, rh := range scanBlockForAiChallengeResponseHashes(template.Block) {
+					c.escrowStore.MarkSlashedByResponse(rh)
+				}
 			}
 			if !template.IsSynced && !kapi.mineWhenNotSynced {
 				return
@@ -209,14 +204,8 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				}
 			}
 
-			// If the block template carries a pending AiRequest, dispatch it only to miners
-			// that have declared the required model via mining.declare_capabilities.
-			if task := scanBlockForAiTask(template.Block); task != nil && !blockTaskActive(uint64(template.Block.Header.DAAScore)) {
-				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob && state.HasDeclaredModel(task.ModelIDHex) {
-					// DAA already appended above; add only the task JSON → MiningNotifyWithTask (5 params).
-					jobParams = append(jobParams, taskJSON)
-				}
-			}
+			// Private inference is dispatched only by the authenticated service relay,
+			// after the node confirms the obligation. Never append a legacy task here.
 
 			if err := client.Send(gostratum.JsonRpcEvent{
 				Version: "2.0",
@@ -280,98 +269,4 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}()
 		}
 	}
-}
-
-const opOIChallengeInterval = 60 * time.Minute
-const opOIChallengeDeadline = 5 * time.Minute
-
-// startChallengeLoop periodically sends OPoI capability challenges to all connected miners.
-// The challenge model is picked randomly from those declared by the miner via
-// mining.declare_capabilities. Miners with no declared models are disconnected immediately.
-func (c *clientListener) startChallengeLoop(ctx context.Context) {
-	ticker := time.NewTicker(opOIChallengeInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.sendChallenges()
-		}
-	}
-}
-
-func (c *clientListener) sendChallenges() {
-	c.clientLock.RLock()
-	defer c.clientLock.RUnlock()
-	for _, client := range c.clients {
-		if !client.Connected() || !client.IsAuthorized() {
-			continue
-		}
-		go c.sendChallengeToClient(client)
-	}
-}
-
-func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
-	state := GetMiningState(ctx)
-
-	state.challengeLock.Lock()
-	if state.activeChallengeNonce != "" {
-		// A challenge is already in flight; the deadline timer will kick if unanswered.
-		state.challengeLock.Unlock()
-		return
-	}
-	// No declared models = no provable inference capability = no mining.
-	if len(state.declaredModels) == 0 {
-		state.challengeLock.Unlock()
-		ctx.Logger.Warn("OPoI: no models declared — no inference = no mining, disconnecting",
-			zap.String("miner", ctx.WalletAddr))
-		ctx.Disconnect()
-		return
-	}
-	// Challenge with a random model from those declared — proves the miner has what it claims.
-	var pick [8]byte
-	rand.Read(pick[:]) // crypto/rand fails closed in the supported Go toolchain
-	idx := binary.LittleEndian.Uint64(pick[:]) % uint64(len(state.declaredModels))
-	modelID := state.declaredModels[idx]
-	nonce := make([]byte, 8)
-	rand.Read(nonce) //nolint:errcheck — crypto/rand.Read never returns an error
-	nonceHex := hex.EncodeToString(nonce)
-	state.activeChallengeNonce = nonceHex
-	state.activeChallengeModel = modelID
-	state.challengeIssuedAt = time.Now()
-	state.challengePassed = false
-	state.challengeLock.Unlock()
-
-	ctx.Logger.Info("OPoI challenge: sending to pool miner",
-		zap.String("model", modelID[:8]),
-		zap.String("nonce", nonceHex),
-		zap.String("miner", ctx.WalletAddr))
-
-	if err := ctx.Send(gostratum.JsonRpcEvent{
-		Version: "2.0",
-		Method:  "mining.challenge",
-		Params:  []any{modelID, nonceHex},
-	}); err != nil {
-		ctx.Logger.Warn("OPoI challenge: failed to send to miner", zap.Error(err))
-		return
-	}
-
-	// Deadline timer: kick if no response within the deadline window.
-	go func() {
-		select {
-		case <-time.After(opOIChallengeDeadline):
-		case <-ctx.Done():
-			return
-		}
-		state.challengeLock.Lock()
-		unanswered := state.activeChallengeNonce == nonceHex
-		state.challengeLock.Unlock()
-		if unanswered {
-			ctx.Logger.Warn("OPoI challenge: deadline exceeded — no inference = no mining, disconnecting",
-				zap.String("nonce", nonceHex),
-				zap.String("miner", ctx.WalletAddr))
-			ctx.Disconnect()
-		}
-	}()
 }
