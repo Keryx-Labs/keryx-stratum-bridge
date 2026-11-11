@@ -211,8 +211,13 @@ func (sh *shareHandler) HandleSubmit(ctx *gostratum.StratumContext, event gostra
 	initialized := state.initialized
 	diff := state.stratumDiff
 	state.JobLock.Unlock()
-	if gated || !initialized || diff == nil || !sh.canMine() {
+	if gated || !initialized || diff == nil {
 		return relayError(ctx, event, 24, "mining service is not ready")
+	}
+	if !sh.canMine() {
+		// The official miner exits on Unauthorized. A temporary node/audit
+		// observation must refuse this share while retaining the authenticated worker.
+		return relayError(ctx, event, 46, "mining service is temporarily unavailable")
 	}
 	if ctx.Extranonce != "" {
 		suffixLen := 16 - len(ctx.Extranonce)

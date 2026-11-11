@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -164,5 +166,41 @@ func TestCoinbaseMarkersCannotComeFromMinerApplicationName(t *testing.T) {
 	extra := api.coinbaseExtra([]string{strings.Repeat("c", 64)})
 	if strings.Count(extra, "/escrow:") != 1 || strings.Count(extra, "/esig:") != 1 || !strings.HasPrefix(extra, fmt.Sprintf("keryx-bridge/%s/escrow:%s", version, api.escrowPubKey)) {
 		t.Fatal("noncanonical consensus markers")
+	}
+}
+
+func TestTemporaryMiningReadinessDoesNotRevokeAuthorization(t *testing.T) {
+	ctx, conn := gostratum.NewMockContext(context.Background(), zap.NewNop(), MiningStateGenerator())
+	t.Cleanup(func() { conn.Close() })
+	ctx.StratumV3 = true
+	ctx.WalletAddr = "keryxtest:q"
+	ctx.WorkerName = "test01"
+	ctx.MarkAuthorized()
+	state := GetMiningState(ctx)
+	state.capabilitiesReady = true
+	state.initialized = true
+	state.stratumDiff = newKeryxDiff()
+	state.stratumDiff.setDiffValue(1)
+	job := state.AddJob(&BlockJob{Wire: &w.RpcBlock{Header: &w.RpcBlockHeader{}}})
+	response := make(chan []byte, 1)
+	conn.AsyncReadTestDataFromBuffer(func(data []byte) { response <- data })
+	handler := &shareHandler{} // No ready verifier/service observation: work must remain refused.
+	event := gostratum.NewEvent("1", "mining.submit", []any{workerLogin(ctx), strconv.Itoa(job), "1", "", "", strings.Repeat("00", pomProofMinLen)})
+	if err := handler.HandleSubmit(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case raw := <-response:
+		var reply struct {
+			Error []any `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if len(reply.Error) < 1 || reply.Error[0] != float64(46) || !ctx.IsAuthorized() {
+			t.Fatalf("temporary readiness must use retriable Busy (46), not revoke the miner session: %s", raw)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing temporary readiness response")
 	}
 }
