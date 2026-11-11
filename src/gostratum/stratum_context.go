@@ -199,11 +199,11 @@ func (sc *StratumContext) checkDisconnect(err error) {
 
 // Context interface impl
 
-func (StratumContext) Deadline() (time.Time, bool) {
+func (*StratumContext) Deadline() (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func (sc StratumContext) Done() <-chan struct{} {
+func (sc *StratumContext) Done() <-chan struct{} {
 	return sc.done
 }
 
@@ -214,6 +214,6 @@ func (sc *StratumContext) Err() error {
 	return nil
 }
 
-func (d StratumContext) Value(key any) any {
+func (d *StratumContext) Value(key any) any {
 	return d.parentContext.Value(key)
 }
