@@ -23,6 +23,8 @@ verifier_binary: ../../bin/keryx-bridge-verifier
 verifier_sha256: ""
 
 # Required together when stratum_port listens outside loopback.
+# Direct stratum+ssl:// / stratum+tls:// needs official miner dfca69de or later.
+# Use a certificate covering the miner's server hostname; see docs/stratum-tls.md.
 tls_cert_file: ""
 tls_key_file: ""
 

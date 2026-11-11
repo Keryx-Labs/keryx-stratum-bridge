@@ -1,6 +1,6 @@
 # Keryx Stratum bridge — H15/H16 update
 
-Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol, updated for H15/H16 with strikes displayed by delegated escrow key. A bounded Windows/RTX 5080 H16 testnet mining run passed with the official miner and node. Full on-chain inference/audit and deployment qualification remain separate validation work.
+Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol, updated for H15/H16 with strikes displayed by delegated escrow key. Bounded Windows/RTX 5080 runs passed mining, a private request/response and the audits actually drawn under both H15 (isolated testnet chain) and H16 (public testnet). See the [inference validation record](docs/validation/h15-h16-inference-20261111.md) for exact versions, evidence and limits.
 
 Consensus source: [keryx-node a69a1a08](https://github.com/Keryx-Labs/keryx-node/tree/a69a1a08c0e49181eecafd6128695dd0d7c667e3). Wire reference: [keryx-miner v0.6.1 / 4167e409](https://github.com/Keryx-Labs/keryx-miner/tree/4167e409e3217580ca257ca3eb35792260b7e40f). Bridge base: `d9fe31ff91337922c4c593d3717f01f002518a23`.
 
@@ -43,7 +43,7 @@ Edit `cmd/keryxbridge/config.yaml`. File paths resolve relative to the configura
 
 For example, the **structure** of `worker-tokens.json` is `{"rig01":"<64 lowercase hex characters: SHA256 of its private token>"}`. No example token, private key, live address or operational certificate is supplied.
 
-The official miner's referenced Stratum client uses a TCP socket. For remote workers, use an authenticated encrypted tunnel exposing a loopback TCP endpoint to that miner, or a local TLS forwarder to this bridge's TLS listener. Do not assume that this miner directly supports a `stratum+ssl` URI. Non-loopback bridge listeners require a TLS certificate and key; node RPC and monitoring must remain on loopback.
+The official miner added direct `stratum+ssl://` and `stratum+tls://` connections in [commit dfca69de](https://github.com/Keryx-Labs/keryx-miner/commit/dfca69de0c03d330153788b1b31391e5f3d95e79), after the v0.6.1-PoM release used for the H15/H16 inference runs. This bridge already has a compatible TLS 1.3 listener. See [direct TLS setup](docs/stratum-tls.md). Older miner builds need an authenticated encrypted tunnel exposing a loopback TCP endpoint, or a local TLS forwarder. Non-loopback bridge listeners require a TLS certificate and key; node RPC and monitoring must remain on loopback.
 
 ## Observe
 
