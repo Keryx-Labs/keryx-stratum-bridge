@@ -36,7 +36,8 @@ type KeryxApi struct {
 	// escrowPubKey is the 64-hex Schnorr pubkey embedded in the coinbase as /escrow:<pk>.
 	// It tells the node to route the 20% escrow cut to a CSV-locked output (claimable after
 	// 36 000 blocks) instead of burning it. Empty = no escrow key available → cut is burned.
-	escrowPubKey string
+	escrowPubKey  string
+	payoutAddress string
 	// escrowCert is the 128-hex delegation cert embedded as /esig:<cert>. From H6 the node
 	// rejects a template without a valid /escrow + /esig pair. Empty = no cert available.
 	escrowCert string
@@ -64,14 +65,18 @@ func NewKeryxAPI(address string, blockWaitTime time.Duration, logger *zap.Sugare
 	return api, nil
 }
 
-func (ks *KeryxApi) Start(ctx context.Context, blockCb func()) {
-	ks.waitForSync(true)
+func (ks *KeryxApi) Start(ctx context.Context, blockCb func()) error {
+	if err := ks.waitForSync(ctx, true); err != nil {
+		return err
+	}
 	go ks.startBlockTemplateListener(ctx, blockCb)
 	go ks.startStatsThread(ctx)
+	return nil
 }
 
 func (ks *KeryxApi) startStatsThread(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -81,6 +86,9 @@ func (ks *KeryxApi) startStatsThread(ctx context.Context) {
 			dagResponse, err := ks.keryxd.GetBlockDAGInfo()
 			if err != nil {
 				ks.logger.Warn("failed to get network hashrate from keryx, prom stats will be out of date", zap.Error(err))
+				continue
+			}
+			if len(dagResponse.TipHashes) == 0 {
 				continue
 			}
 			response, err := ks.keryxd.EstimateNetworkHashesPerSecond(dagResponse.TipHashes[0], 1000)
@@ -106,7 +114,7 @@ func (ks *KeryxApi) reconnect() error {
 	return nil
 }
 
-func (s *KeryxApi) waitForSync(verbose bool) error {
+func (s *KeryxApi) waitForSync(ctx context.Context, verbose bool) error {
 	if verbose {
 		s.logger.Info("checking keryxd sync state")
 	}
@@ -119,7 +127,11 @@ func (s *KeryxApi) waitForSync(verbose bool) error {
 			break
 		}
 		s.logger.Warn("Keryx is not synced, waiting for sync before starting bridge")
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
 	}
 	if verbose {
 		s.logger.Info("keryxd synced, starting server")
@@ -128,17 +140,24 @@ func (s *KeryxApi) waitForSync(verbose bool) error {
 }
 
 func (s *KeryxApi) startBlockTemplateListener(ctx context.Context, blockReadyCb func()) {
-	blockReadyChan := make(chan bool)
+	blockReadyChan := make(chan bool, 1)
 	err := s.keryxd.RegisterForNewBlockTemplateNotifications(func(_ *appmessage.NewBlockTemplateNotificationMessage) {
-		blockReadyChan <- true
+		select {
+		case blockReadyChan <- true:
+		default:
+		}
 	})
 	if err != nil {
 		s.logger.Error("fatal: failed to register for block notifications from keryx")
 	}
 
 	ticker := time.NewTicker(s.blockWaitTime)
+	defer ticker.Stop()
 	for {
-		if err := s.waitForSync(false); err != nil {
+		if err := s.waitForSync(ctx, false); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			s.logger.Error("error checking keryxd sync state, attempting reconnect: ", err)
 			if err := s.reconnect(); err != nil {
 				s.logger.Error("error reconnecting to keryxd, waiting before retry: ", err)
@@ -160,37 +179,10 @@ func (s *KeryxApi) startBlockTemplateListener(ctx context.Context, blockReadyCb 
 
 func (ks *KeryxApi) GetBlockTemplate(
 	client *gostratum.StratumContext) (*BlockTemplate, error) {
-	// OPoI: the node verifies the coinbase tag with verify_tag_fixed(nonce), so the
-	// extra_data must carry "/{nonce_hex16}/ai:v1:{tag_fixed(nonce)}" — exactly like the
-	// solo miner (keryx-miner/src/client/grpc.rs). A random tag without the nonce prefix
-	// is rejected with "OPoI tag missing": parse_opoi needs the embedded nonce to recompute
-	// and check the tag.
-	b := make([]byte, 8)
-	rand.Read(b)
-	nonce := binary.LittleEndian.Uint64(b)
-	// Route the 20% escrow cut to the bridge's CSV-locked escrow (claimed after the
-	// challenge window) instead of letting the node burn it. Mirrors the solo miner.
-	escrowPart := ""
-	if ks.escrowPubKey != "" {
-		escrowPart = "/escrow:" + ks.escrowPubKey
+	if !client.IsAuthorized() || client.WalletAddr != ks.payoutAddress {
+		return nil, fmt.Errorf("unauthorized payout address")
 	}
-	// H6: the delegation cert authorizing this escrow key for the payout address.
-	if ks.escrowCert != "" {
-		escrowPart += "/esig:" + ks.escrowCert
-	}
-	opoiTag := fmt.Sprintf("%s/%016x/ai:v1:%s", escrowPart, nonce, tagFixed(nonce))
-	// Tier-reward: declare this miner's verified models in the coinbase ai:cap field so the
-	// node scales the block's miner subsidy by the highest tier actually served. Mirrors the
-	// solo miner (keryx-miner/src/client/grpc.rs). Without it consensus sees no declared tier
-	// and floors the reward to the lightest model once tier_reward_activation is live.
-	capPart := ""
-	if models := GetMiningState(client).DeclaredModels(); len(models) > 0 {
-		capPart = "/ai:cap:" + strings.Join(models, ",")
-	}
-	// The template MUST come from the pom-aware client: the upstream kaspad types drop
-	// the Keryx-only header fields, and a submitted header missing them is invalid.
-	template, err := ks.wire.GetBlockTemplate(client.WalletAddr,
-		fmt.Sprintf(`'%s' via keryx-labs/keryx-stratum-bridge_%s%s%s`, client.RemoteApp, version, opoiTag, capPart))
+	template, err := ks.wire.GetBlockTemplate(ks.payoutAddress, ks.coinbaseExtra(GetMiningState(client).DeclaredModels()))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed fetching new block template from keryx")
 	}
@@ -207,4 +199,17 @@ func (ks *KeryxApi) GetBlockTemplate(
 // SubmitBlock pushes a solved block through the pom-aware client.
 func (ks *KeryxApi) SubmitBlock(block *keryxwire.RpcBlock) (*keryxwire.SubmitBlockResponseMessage, error) {
 	return ks.wire.SubmitBlock(block)
+}
+
+// RemoteApp and other miner-controlled strings must never precede consensus
+// markers. The node uses first-marker-wins parsing for escrow and capabilities.
+func (ks *KeryxApi) coinbaseExtra(models []string) string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	nonce := binary.LittleEndian.Uint64(b)
+	extra := fmt.Sprintf("keryx-bridge/%s/escrow:%s/esig:%s/%016x/ai:v1:%s", version, ks.escrowPubKey, ks.escrowCert, nonce, tagFixed(nonce))
+	if len(models) > 0 {
+		extra += "/ai:cap:" + strings.Join(models, ",")
+	}
+	return extra
 }
