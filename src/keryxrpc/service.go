@@ -52,8 +52,10 @@ func (c *Client) GetServiceStrikes() (*keryxwire.GetServiceStrikesResponseMessag
 	return r, nil
 }
 
-func (c *Client) GetAwaitedOpenings(key string, requests []string) (*keryxwire.GetAwaitedOpeningsResponseMessage, error) {
-	msg, err := c.roundTrip(&keryxwire.KaspadMessage{Payload: &keryxwire.KaspadMessage_GetAwaitedOpeningsRequest{GetAwaitedOpeningsRequest: &keryxwire.GetAwaitedOpeningsRequestMessage{EscrowPubkey: key, RequestHashes: requests}}})
+// The node queries openings only for the explicitly supplied response transaction IDs.
+// The escrow key identifies request obligations; it does not enumerate response audits.
+func (c *Client) GetAwaitedOpenings(key string, requests, responses []string) (*keryxwire.GetAwaitedOpeningsResponseMessage, error) {
+	msg, err := c.roundTrip(&keryxwire.KaspadMessage{Payload: &keryxwire.KaspadMessage_GetAwaitedOpeningsRequest{GetAwaitedOpeningsRequest: &keryxwire.GetAwaitedOpeningsRequestMessage{EscrowPubkey: key, RequestHashes: requests, ResponseTxids: responses}}})
 	if err != nil {
 		return nil, err
 	}

@@ -341,7 +341,7 @@ func (s *serviceRelay) poll() error {
 		hashes = append(hashes, h)
 	}
 	sort.Strings(hashes)
-	ledger, err := s.rpc.GetAwaitedOpenings(s.state.Escrow, hashes)
+	ledger, err := s.nodeObligationsLocked(hashes)
 	if err != nil {
 		return err
 	}
@@ -594,7 +594,7 @@ func (s *serviceRelay) HandleAnswer(ctx *gostratum.StratumContext, event gostrat
 		}
 		return ctx.Reply(gostratum.NewResponse(event, true, nil))
 	}
-	ledger, err := s.rpc.GetAwaitedOpenings(s.state.Escrow, []string{t.ID})
+	ledger, err := s.nodeObligationsLocked([]string{t.ID})
 	if err != nil || !ledger.RequestsChecked {
 		return relayError(ctx, event, 46, "node obligation check unavailable")
 	}
@@ -649,7 +649,7 @@ func (s *serviceRelay) HandleOpening(ctx *gostratum.StratumContext, event gostra
 		s.err = "owning worker could not produce an audit opening"
 		return relayError(ctx, event, 46, "worker audit failure retained")
 	}
-	ledger, err := s.rpc.GetAwaitedOpenings(s.state.Escrow, nil)
+	ledger, err := s.nodeObligationsLocked(nil)
 	if err != nil {
 		return relayError(ctx, event, 46, "node draw check unavailable")
 	}
