@@ -1,6 +1,6 @@
 # Keryx Stratum bridge — H15/H16 update
 
-Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol. A bounded Windows/RTX 5080 H16 testnet mining run passed with the official miner and node. This branch remains a **draft awaiting complete inference/audit and deployment qualification**.
+Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol, updated for H15/H16 with strikes displayed by delegated escrow key. A bounded Windows/RTX 5080 H16 testnet mining run passed with the official miner and node. Full on-chain inference/audit and deployment qualification remain separate validation work.
 
 Consensus source: [keryx-node a69a1a08](https://github.com/Keryx-Labs/keryx-node/tree/a69a1a08c0e49181eecafd6128695dd0d7c667e3). Wire reference: [keryx-miner v0.6.1 / 4167e409](https://github.com/Keryx-Labs/keryx-miner/tree/4167e409e3217580ca257ca3eb35792260b7e40f). Bridge base: `d9fe31ff91337922c4c593d3717f01f002518a23`.
 

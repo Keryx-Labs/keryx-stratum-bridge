@@ -469,10 +469,9 @@ func GetAverageHashrateGHs(stats *WorkStats) float64 {
 	return stats.SharesDiff.Load() / time.Since(stats.StartTime).Seconds()
 }
 
-// HandleDeclareCapabilities stores the SLM model IDs declared by a pool miner.
-// Validation mirrors the solo miner startup check:
-//  1. model_id must be in the known registry (sha2-256 of weight file is the ID by construction)
-//  2. the primary weight CID must be reachable via IPFS block/stat — proves the file exists
+// HandleDeclareCapabilities binds the authenticated session to registered model IDs.
+// A declaration admits jobs; consensus proof verification establishes valid work.
+// Identical periodic declarations are allowed, but the model set cannot change.
 func (sh *shareHandler) HandleDeclareCapabilities(ctx *gostratum.StratumContext, event gostratum.JsonRpcEvent) error {
 	if !ctx.IsAuthorized() || len(event.Params) == 0 || len(event.Params) > 16 {
 		return relayError(ctx, event, 24, "authorized model declaration required")
