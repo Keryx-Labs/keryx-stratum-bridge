@@ -1,145 +1,69 @@
-# Keryx Stratum Bridge
+# Keryx Stratum bridge — H15/H16 update
 
-This is a lightweight daemon that allows mining to a local (or remote) keryx node using stratum-base miners.
+Bridge for the official Keryx miner's Stratum v3 mining and private inference protocol, updated for H15/H16 with strikes displayed by delegated escrow key. Bounded Windows/RTX 5080 runs passed mining, a private request/response and the audits actually drawn under both H15 (isolated testnet chain) and H16 (public testnet). See the [inference validation record](docs/validation/h15-h16-inference-20261111.md) for exact versions, evidence and limits.
 
-This daemon is confirmed working with the miners below in both dual-mining and keryx-only modes (for those that support it) and Windows/MacOs/Linux/HiveOs.
-* keryx-miner (v0.5.4+ for PoM / stratum v3)
+Consensus source: [keryx-node a69a1a08](https://github.com/Keryx-Labs/keryx-node/tree/a69a1a08c0e49181eecafd6128695dd0d7c667e3). Wire reference: [keryx-miner v0.6.1 / 4167e409](https://github.com/Keryx-Labs/keryx-miner/tree/4167e409e3217580ca257ca3eb35792260b7e40f). Bridge base: `d9fe31ff91337922c4c593d3717f01f002518a23`.
 
-No fee, forever. Do what you want with it.
+This bridge serves one explicitly configured payout address and its delegated escrow key. It is intended for an operator's authenticated workers. It does not implement a public pool's user accounts, share accounting, payouts or independent escrow keys per worker.
 
-Discord: [Keryx Community](https://discord.gg/keryx-labs)
+Changes:
 
-Forked from https://github.com/onemorebsmith/kaspa-stratum-bridge — rebranded for Keryx.
+- Verify each H15/H16 PoM v5 share with pinned official consensus code, including the H16 pad parameters, before crediting or submitting it. Reject duplicate, unauthorized, mismatched-model and proof-less submissions.
+- Follow the official miner's difficulty conversion and accept a network-valid block even when the pool share target is harder. PoM job admission does not wait for the legacy soft inference challenge, which the official miner ignores under PoM.
+- Poll node obligations automatically; dispatch `mining.ai_request`, seal/sign `mining.ai_response`, and handle `mining.ai_opening` / `mining.ai_opening_result`. Requests and audits are not enabled manually one by one.
+- Verify trace, residual, recurrent and phased attention opening proofs before signing them. Persist encrypted requests, owning worker identities, signed envelopes and verified attention roots before sending/retrying.
+- Show current and lifetime strikes, suspensions and pending burns by the bridge's escrow key, mapped through its verified payout delegation to the node's service identity. Show unavailable/stale observations explicitly.
+- Remove miner-supplied application names from consensus coinbase data; require strict payout/worker authorization, bounded frames/connections, deadlines and TLS outside loopback. Monitoring uses separate loopback HTTP routers.
 
+## Build
 
-## PoM support (stratum v3)
+Use Go **1.26.11** or a later patched version, a C compiler (the inherited Kaspa dependency uses CGO), and Rust **1.96.1**. Windows builds require a MinGW GCC on PATH. No miner, node, IPFS daemon or wallet is started by these commands.
 
-Since the Proof-of-Model hard fork (`pom_activation`, mainnet DAA **37_780_000**), a
-valid block must carry a per-miner possession proof in `RpcBlock.pomProof` (proto field
-4, borsh-encoded `PomProof`). This bridge supports it end-to-end via **stratum v3**:
-
-- Miners that declare the `keryx-stratum-v3` capability (keryx-miner v0.5.4+) ship their
-  borsh `PomProof` in the `mining.submit` 6th parameter; the bridge validates the
-  proof-bound PoW value and relays the proof to `keryxd`.
-- `mining.notify` carries the real DAA score and block bits so the miner selects the
-  right PoW salt era and gates PoM at the fork.
-- Block submission goes through a Keryx-aware gRPC client that carries the PoM header
-  fields upstream `kaspanet/kaspad` drops (`pomProof`, `pomFinalState`,
-  `serviceStateHash`, `pomTier`).
-- Pre-v3 miners still work in the legacy kHeavyHash path (valid only below the PoM gate).
-
-This requires a synced `keryxd`, a running IPFS (kubo) daemon, and an H6 escrow
-delegation cert — see **Requirements** below.
-
-> Legacy note: solo miners mining directly to `keryxd` (gRPC, no stratum) assemble the
-> full block, including the proof, themselves and are unaffected by any of this.
-
-
-## Requirements (PoM / H6)
-
-- **keryxd** — a synced node (default gRPC `127.0.0.1:22110`).
-- **IPFS (kubo)** — the bridge verifies model weights (at `declare_capabilities`) and the
-  inference CIDs miners submit against a local kubo daemon (default API
-  `http://127.0.0.1:5001`). Install kubo from https://dist.ipfs.tech. When the local API
-  is down at startup the bridge auto-starts kubo: it uses `ipfs_binary` from the config,
-  else an `ipfs` next to the executable, else one in `PATH`. A convenience symlink
-  `cmd/keryxbridge/ipfs` ships in the repo pointing at the maintainer's kubo — **re-point
-  it at your own binary**: `ln -sf /path/to/ipfs cmd/keryxbridge/ipfs`.
-- **Escrow delegation cert (H6+)** — from H6 the node rejects any block template without a
-  valid `/escrow` + `/esig` pair. Generate a cert binding the bridge escrow key (logged at
-  startup) to your payout address with
-  `keryx-cli delegate-escrow <escrow_pubkey> <payout_address>`, then set `escrow_cert` in
-  the config. All workers must mine with that exact payout address (single-address pools).
-
-
-## Hive Setup
-[detailed instructions here](hive-setup.md)
-
-
-# Features:
-
-Shares-based work allocation with miner-like periodic stat output:
-
-![image](https://user-images.githubusercontent.com/59971111/191983487-479e19ec-a8cb-4edb-afc4-55a1165e79fc.png)
-
-
-
-Optional monitoring UI:
-
-[monitoring-setup.md](monitoring-setup.md)
-
-![image](https://user-images.githubusercontent.com/59971111/192025446-f20d74a5-f9e0-4290-b98b-9f56af8f23b4.png)
-
-![image](https://user-images.githubusercontent.com/59971111/191980688-2d0faf6b-d551-4880-a316-de2303cfeb7d.png)
-
-
-Prometheus API:
-
-If the app is run with the `-prom={port}` flag the application will host stats on the port specified by `{port}`, these stats are documented in the file [prom.go](src/keryxstratum/prom.go). This is intended to be use by prometheus but the stats can be fetched and used independently if desired. `curl http://localhost:2114/metrics | grep ks_` will get a listing of current stats. All published stats have a `ks_` prefix for ease of use.
-
-```
-user:~$ curl http://localhost:2114/metrics | grep ks_
-# HELP ks_estimated_network_hashrate_gauge Gauge representing the estimated network hashrate
-# TYPE ks_estimated_network_hashrate_gauge gauge
-ks_estimated_network_hashrate_gauge 2.43428982879776e+14
-# HELP ks_network_block_count Gauge representing the network block count
-# TYPE ks_network_block_count gauge
-ks_network_block_count 271966
-# HELP ks_network_difficulty_gauge Gauge representing the network difficulty
-# TYPE ks_network_difficulty_gauge gauge
-ks_network_difficulty_gauge 1.2526479386202519e+14
-# HELP ks_valid_share_counter Number of shares found by worker over time
-# TYPE ks_valid_share_counter counter
-ks_valid_share_counter{ip="192.168.0.17",miner="SRBMiner-MULTI/1.0.8",wallet="keryx:qzk3uh2twkhu0fmuq50mdy3r2yzuwqvstq745hxs7tet25hfd4egcafcdmpdl",worker="002"} 276
-ks_valid_share_counter{ip="192.168.0.65",miner="BzMiner-v11.1.0",wallet="keryx:qzk3uh2twkhu0fmuq50mdy3r2yzuwqvstq745hxs7tet25hfd4egcafcdmpdl",worker="001"} 307
-# HELP ks_worker_job_counter Number of jobs sent to the miner by worker over time
-# TYPE ks_worker_job_counter counter
-ks_worker_job_counter{ip="192.168.0.17",miner="SRBMiner-MULTI/1.0.8",wallet="keryx:qzk3uh2twkhu0fmuq50mdy3r2yzuwqvstq745hxs7tet25hfd4egcafcdmpdl",worker="002"} 3471
-ks_worker_job_counter{ip="192.168.0.65",miner="BzMiner-v11.1.0",wallet="keryx:qzk3uh2twkhu0fmuq50mdy3r2yzuwqvstq745hxs7tet25hfd4egcafcdmpdl",worker="001"} 3425
-
+```powershell
+./build.ps1
 ```
 
-# Install
+On Linux:
 
-## Docker All-in-one
+```sh
+./make_release.sh
+```
 
-Note: This does requires that docker is installed.
+Both executables and `SHA256SUMS` are written to `bin/`. Cargo consensus dependencies are pinned by commit and `verifier/Cargo.lock`.
 
+## Configure
 
-`docker compose -f docker-compose-all.yml up -d` will run the bridge with default settings. This assumes a local keryxd node with default port settings and exposes port 5555 to incoming stratum connections.
+Edit `cmd/keryxbridge/config.yaml`. File paths resolve relative to the configuration file.
 
+1. Generate a **new dedicated escrow key** using the official tooling. The private key previously committed to this repository is public/compromised; this version rejects its fingerprint. Never reuse a personal payout wallet key as the bridge escrow key.
+2. Set `payout_address`, `escrow_key_file`, and the offline delegation certificate produced by `keryx-cli delegate-escrow <escrow_pubkey> <payout_address>`. Startup verifies the address checksum/network and the certificate's Schnorr signature before connecting workers.
+3. Generate a separate high-entropy worker token for each worker. `worker_auth_file` is a JSON object mapping a worker name to the lowercase SHA256 digest of its token. Use `<payout_address>.<worker_name>` as the miner login and its token as `--pool-password`. Worker names use 1–64 ASCII letters, digits, `_` or `-`.
+4. Restrict the secret files and state directory to the operator's service account. On Windows apply NTFS ACLs; the POSIX file mode is not an ACL substitute.
+5. Set the helper path. Optionally set `verifier_sha256` to the locally approved helper hash. Start the bridge only when the operator is ready for node submissions and real mining.
 
-This also spins up a local prometheus and grafana instance that gather stats and host the metrics dashboard. Once the services are up and running you can view the dashboard using `http://127.0.0.1:3000/d/x7cE7G74k/monitoring`
+For example, the **structure** of `worker-tokens.json` is `{"rig01":"<64 lowercase hex characters: SHA256 of its private token>"}`. No example token, private key, live address or operational certificate is supplied.
 
-Default grafana user/pass: admin/admin
+The official miner added direct `stratum+ssl://` and `stratum+tls://` connections in [commit dfca69de](https://github.com/Keryx-Labs/keryx-miner/commit/dfca69de0c03d330153788b1b31391e5f3d95e79), after the v0.6.1-PoM release used for the H15/H16 inference runs. This bridge already has a compatible TLS 1.3 listener. See [direct TLS setup](docs/stratum-tls.md). Older miner builds need an authenticated encrypted tunnel exposing a loopback TCP endpoint, or a local TLS forwarder. Non-loopback bridge listeners require a TLS certificate and key; node RPC and monitoring must remain on loopback.
 
-Most of the stats on the graph are averaged over an hour time period, so keep in mind that the metrics might be inaccurate for the first hour or so that the bridge is up.
+## Observe
 
+`print_stats` includes the escrow key, delegated service identity, consecutive misses, lifetime strikes, pending burns and suspension DAA. The loopback health listener exposes:
 
-## Docker (non-compose)
+- `GET /bridge/strikes`: node observations, exact burn amount as a decimal sompi string, observation time and availability.
+- `GET /bridge/service`: queue/audit counts and service readiness, without prompts, answers, private keys or worker tokens.
+- `GET /bridge/pubkey`: public escrow key and delegated service identity.
+- `GET /readyz`: 503 while the node, obligations, verifier or service observations are unavailable.
 
-Note: This does not require pulling down the repo, it only requires that docker is installed.
+Prometheus exposes `ks_escrow_service_status{escrow_key,service_identity,field}`. Check `available` and `observed_unix` before interpreting the other gauges. An unsynced node cannot replace a previous strike observation with an available zero. Node penalties belong to the payout-script identity; multiple delegated keys sharing that identity necessarily share its penalty history. A model declaration admits jobs; full consensus proofs, signed responses and audited openings establish the work.
 
-`docker run -p 5555:5555 keryx-labs/keryx_bridge:latest --log=false` will run the bridge with default settings. This assumes a local keryxd node with default port settings and exposes port 5555 to incoming stratum connections.
+## Migration and limits
 
+This branch intentionally fails closed with the old sample configuration. Keep the original node, miner and personal keys outside this checkout. Preserve the service state file and each owning miner's trace store across reconnects and upgrades.
 
-Detailed:
+H15/H16 are not the block-task fork: `block_task_activation` is unscheduled on both pinned networks. The existing experimental v4 code is not enabled as a shortcut for H15.
 
-`docker run -p {stratum_port}:5555 keryx-labs/keryx_bridge --log=false --keryxd={keryxd_address} --stats={false}` will run the bridge targeting a keryxd node at {keryxd_address}. stratum port accepting connections on {stratum_port}, and only logging connection activity, found blocks, and errors
+The inherited legacy automatic claim loop is **not started**. Its 36,000-block assumptions and optimistic mempool accounting are unsuitable as a claim authority for the current 792,000-block service-bond escrow regime. This update signs only zero-input/zero-output service publications; recovering locked escrow requires a separately validated current claim tool and the correct dedicated key. No escrow or wallet funds were spent to validate this branch.
 
+A SHA256 manifest verifies local artifact bytes against a trusted manifest. An untrusted remote miner can report any hash or name. This update does not claim to force remote execution of an official bridge binary; that would require a separately specified trust/attestation mechanism. Correctness comes from authenticated routing, verified delegation, consensus proofs and node-observed obligations.
 
-## Manual build
-
-Install go 1.18+ using whatever package manager is appropriate for your system
-
-
-run `cd cmd/keryxbridge;go build .`
-
-
-Modify the config file in ./cmd/keryxbridge/config.yaml with your setup, the file comments explain the various flags
-
-
-run `./keryxbridge` in the `cmd/keryxbridge` directory
-
-
-all-in-one (build + run) `cd cmd/keryxbridge/;go build .;./keryxbridge`
+See [validation and recovery notes](docs/h15-h16.md) before qualification or deployment.

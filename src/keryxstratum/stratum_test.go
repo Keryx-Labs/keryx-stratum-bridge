@@ -77,6 +77,7 @@ func TestPoolHzCalculation(t *testing.T) {
 
 // snooper. Inspect coms between miner and pool
 func TestBridge(t *testing.T) {
+	t.Skip("manual third-party pool snooper; never run as an automated test")
 	serverConn, err := net.Dial("tcp", "pool.us.woolypooly.com:3112")
 	if err != nil {
 		t.Fatal(err)

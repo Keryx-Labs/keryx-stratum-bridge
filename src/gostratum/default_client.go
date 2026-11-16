@@ -59,6 +59,9 @@ func HandleKeepalive(ctx *StratumContext, event JsonRpcEvent) error {
 }
 
 func HandleAuthorize(ctx *StratumContext, event JsonRpcEvent) error {
+	if ctx.IsAuthorized() {
+		return ctx.Reply(NewResponse(event, nil, []any{24, "already authorized", nil}))
+	}
 	if len(event.Params) < 1 {
 		return fmt.Errorf("malformed event from miner, expected param[1] to be address")
 	}
@@ -81,6 +84,7 @@ func HandleAuthorize(ctx *StratumContext, event JsonRpcEvent) error {
 	ctx.WalletAddr = address
 	ctx.WorkerName = workerName
 	ctx.Logger = ctx.Logger.With(zap.String("worker", ctx.WorkerName), zap.String("addr", ctx.WalletAddr))
+	ctx.MarkAuthorized()
 
 	if err := ctx.Reply(NewResponse(event, true, nil)); err != nil {
 		return errors.Wrap(err, "failed to send response to authorize")
@@ -94,6 +98,23 @@ func HandleAuthorize(ctx *StratumContext, event JsonRpcEvent) error {
 }
 
 func HandleSubscribe(ctx *StratumContext, event JsonRpcEvent) error {
+	if ctx.IsAuthorized() {
+		return ctx.Reply(NewResponse(event, nil, []any{24, "subscribe before authorize", nil}))
+	}
+	if len(event.Params) > 2 {
+		return ctx.Reply(NewResponse(event, nil, []any{20, "invalid subscribe parameters", nil}))
+	}
+	if len(event.Params) > 0 {
+		app, ok := event.Params[0].(string)
+		if !ok || len(app) > 128 {
+			return ctx.Reply(NewResponse(event, nil, []any{20, "invalid application name", nil}))
+		}
+		for _, c := range app {
+			if c < 32 || c > 126 {
+				return ctx.Reply(NewResponse(event, nil, []any{20, "invalid application name", nil}))
+			}
+		}
+	}
 	if err := ctx.Reply(NewResponse(event,
 		[]any{true, "EthereumStratum/1.0.0"}, nil)); err != nil {
 		return errors.Wrap(err, "failed to send response to subscribe")
@@ -127,7 +148,7 @@ func SendExtranonce(ctx *StratumContext) {
 	}
 }
 
-var walletRegex = regexp.MustCompile("(keryx|keryxtest):[a-z0-9]+")
+var walletRegex = regexp.MustCompile("^(keryx|keryxtest):[a-z0-9]+$")
 
 func CleanWallet(in string) (string, error) {
 	if !strings.HasPrefix(in, "keryx:") && !strings.HasPrefix(in, "keryxtest:") {

@@ -44,7 +44,7 @@ func NewClient(address string) *Client {
 	return &Client{address: address}
 }
 
-func (c *Client) ensureStream() error {
+func (c *Client) ensureStream(ctx context.Context) error {
 	if c.stream != nil {
 		return nil
 	}
@@ -59,7 +59,7 @@ func (c *Client) ensureStream() error {
 		}
 		c.conn = conn
 	}
-	stream, err := c.conn.NewStream(context.Background(), streamDesc, messageStreamMethod)
+	stream, err := c.conn.NewStream(ctx, streamDesc, messageStreamMethod)
 	if err != nil {
 		return errors.Wrap(err, "failed opening MessageStream to keryxd")
 	}
@@ -78,55 +78,40 @@ func (c *Client) teardownStream() {
 	}
 }
 
-// roundTrip sends one request and waits for the first recognizable response payload.
-// Requests are serialized: the node answers in order, and the bridge never registers
-// for notifications on this stream, so the next decoded payload is our response.
+// Each request has its own deadline-bound stream on a reusable connection.
+// This bounds dial/send/receive together and avoids accepting a late reply for
+// another request after a timeout. This stream never subscribes to notifications.
 func (c *Client) roundTrip(req *keryxwire.KaspadMessage) (*keryxwire.KaspadMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if err := c.ensureStream(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	if err := c.ensureStream(ctx); err != nil {
 		c.teardownStream()
 		return nil, err
 	}
-	if err := c.stream.SendMsg(req); err != nil {
-		c.teardownStream()
-		return nil, errors.Wrap(err, "failed sending request to keryxd")
-	}
-
-	type recvResult struct {
-		msg *keryxwire.KaspadMessage
-		err error
-	}
-	resultChan := make(chan recvResult, 1)
-	stream := c.stream
-	go func() {
-		for {
-			msg := &keryxwire.KaspadMessage{}
-			if err := stream.RecvMsg(msg); err != nil {
-				resultChan <- recvResult{nil, err}
-				return
-			}
-			// Unknown payload types decode to a nil Payload — skip them.
-			if msg.Payload != nil {
-				resultChan <- recvResult{msg, nil}
-				return
-			}
+	defer func() {
+		if c.stream != nil {
+			c.stream.CloseSend()
+			c.stream = nil
 		}
 	}()
-
-	select {
-	case result := <-resultChan:
-		if result.err != nil {
-			c.teardownStream()
-			return nil, errors.Wrap(result.err, "failed receiving response from keryxd")
-		}
-		return result.msg, nil
-	case <-time.After(requestTimeout):
-		// Force the pending RecvMsg to error out so the goroutine exits.
+	if err := c.stream.SendMsg(req); err != nil {
 		c.teardownStream()
-		return nil, fmt.Errorf("timed out waiting for keryxd response")
+		return nil, errors.Wrap(err, "failed sending node request")
 	}
+	for i := 0; i < 16; i++ {
+		msg := &keryxwire.KaspadMessage{}
+		if err := c.stream.RecvMsg(msg); err != nil {
+			c.teardownStream()
+			return nil, errors.Wrap(err, "failed receiving node response")
+		}
+		if msg.Payload != nil {
+			return msg, nil
+		}
+	}
+	c.teardownStream()
+	return nil, fmt.Errorf("too many unrecognized node responses")
 }
 
 func (c *Client) GetBlockTemplate(payAddress, extraData string) (*keryxwire.GetBlockTemplateResponseMessage, error) {

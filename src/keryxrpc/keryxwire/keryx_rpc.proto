@@ -740,3 +740,38 @@ message GetServiceStrikesResponseMessage {
 
   RPCError error = 1000;
 }
+
+
+message AwaitedOpeningMessage {
+  string responseTxid = 1;
+  string escrowPubkey = 2;
+  string seed = 3;
+  uint64 deadlineDaa = 4;
+  uint32 pieces = 5;
+  repeated uint64 attentionPath = 6;
+  uint64 acceptedDaa = 7;
+}
+
+
+message AwaitedRequestMessage {
+  string requestHash = 1;
+  uint64 windowEndDaa = 2;
+}
+
+
+message GetAwaitedOpeningsRequestMessage {
+  repeated string responseTxids = 1;
+  string escrowPubkey = 2;
+  repeated string requestHashes = 3;
+}
+
+
+message GetAwaitedOpeningsResponseMessage {
+  uint64 virtualDaaScore = 1;
+  repeated AwaitedOpeningMessage openings = 2;
+  repeated AwaitedRequestMessage awaitedRequests = 3;
+  bool requestsChecked = 4;
+  repeated string closedRequests = 5;
+
+  RPCError error = 1000;
+}

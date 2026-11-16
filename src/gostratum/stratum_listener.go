@@ -2,9 +2,9 @@ package gostratum
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -32,14 +32,16 @@ type StratumListenerConfig struct {
 	ClientListener StratumClientListener
 	StateGenerator StateGenerator
 	Port           string
+	TLSConfig      *tls.Config
+	MaxConnections int
 }
 
 type StratumListener struct {
 	StratumListenerConfig
-	shuttingDown      bool
 	disconnectChannel DisconnectChannel
 	stats             StratumStats
 	workerGroup       sync.WaitGroup
+	connectionSlots   chan struct{}
 }
 
 func NewListener(cfg StratumListenerConfig) *StratumListener {
@@ -53,6 +55,10 @@ func NewListener(cfg StratumListenerConfig) *StratumListener {
 		zap.String("component", "stratum"),
 		zap.String("address", listener.Port),
 	)
+	if cfg.MaxConnections <= 0 {
+		cfg.MaxConnections = 128
+	}
+	listener.connectionSlots = make(chan struct{}, cfg.MaxConnections)
 
 	if listener.StateGenerator == nil {
 		listener.Logger.Warn("no state generator provided, using default")
@@ -63,8 +69,6 @@ func NewListener(cfg StratumListenerConfig) *StratumListener {
 }
 
 func (s *StratumListener) Listen(ctx context.Context) error {
-	s.shuttingDown = false
-
 	serverContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -74,13 +78,17 @@ func (s *StratumListener) Listen(ctx context.Context) error {
 		return errors.Wrapf(err, "failed listening to socket %s", s.Port)
 	}
 	defer server.Close()
+	if s.TLSConfig != nil {
+		server = tls.NewListener(server, s.TLSConfig)
+	}
 
+	s.workerGroup.Add(2)
 	go s.disconnectListener(serverContext)
 	go s.tcpListener(serverContext, server)
 
 	// block here until the context is killed
 	<-ctx.Done() // context cancelled, so kill the server
-	s.shuttingDown = true
+	cancel()
 	server.Close()
 	s.workerGroup.Wait()
 	return context.Canceled
@@ -88,10 +96,10 @@ func (s *StratumListener) Listen(ctx context.Context) error {
 
 func (s *StratumListener) newClient(ctx context.Context, connection net.Conn) {
 	addr := connection.RemoteAddr().String()
-	parts := strings.Split(addr, ":")
-	if len(parts) > 0 {
-		addr = parts[0] // trim off the port
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		addr = host
 	}
+	_, secure := connection.(*tls.Conn)
 	clientContext := &StratumContext{
 		parentContext: ctx,
 		RemoteAddr:    addr,
@@ -99,6 +107,8 @@ func (s *StratumListener) newClient(ctx context.Context, connection net.Conn) {
 		connection:    connection,
 		State:         s.StateGenerator(),
 		onDisconnect:  s.disconnectChannel,
+		Secure:        secure,
+		done:          make(chan struct{}),
 	}
 
 	s.Logger.Info(fmt.Sprintf("new client connecting - %s", addr))
@@ -107,7 +117,12 @@ func (s *StratumListener) newClient(ctx context.Context, connection net.Conn) {
 		s.ClientListener.OnConnect(clientContext)
 	}
 
-	go spawnClientListener(clientContext, connection, s)
+	s.workerGroup.Add(1)
+	go func() {
+		defer s.workerGroup.Done()
+		defer func() { <-s.connectionSlots }()
+		spawnClientListener(clientContext, connection, s)
+	}()
 
 }
 
@@ -120,7 +135,6 @@ func (s *StratumListener) HandleEvent(ctx *StratumContext, event JsonRpcEvent) e
 }
 
 func (s *StratumListener) disconnectListener(ctx context.Context) {
-	s.workerGroup.Add(1)
 	defer s.workerGroup.Done()
 	for {
 		select {
@@ -137,16 +151,20 @@ func (s *StratumListener) disconnectListener(ctx context.Context) {
 }
 
 func (s *StratumListener) tcpListener(ctx context.Context, server net.Listener) {
-	s.workerGroup.Add(1)
 	defer s.workerGroup.Done()
 	for { // listen and spin forever
 		connection, err := server.Accept()
 		if err != nil {
-			if s.shuttingDown {
-				s.Logger.Error("stopping listening due to server shutdown")
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			s.Logger.Error("failed to accept incoming connection", zap.Error(err))
+			continue
+		}
+		select {
+		case s.connectionSlots <- struct{}{}:
+		default:
+			connection.Close()
 			continue
 		}
 		s.newClient(ctx, connection)

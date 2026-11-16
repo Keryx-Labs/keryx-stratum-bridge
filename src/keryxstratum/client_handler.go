@@ -1,10 +1,6 @@
 package keryxstratum
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"regexp"
@@ -76,40 +72,33 @@ func (c *clientListener) OnConnect(ctx *gostratum.StratumContext) {
 	if c.extranonceSize > 0 {
 		ctx.Extranonce = fmt.Sprintf("%0*x", c.extranonceSize*2, extranonce)
 	}
-	go func() {
-		// hacky, but give time for the authorize to go through so we can use the worker name
-		time.Sleep(5 * time.Second)
-		c.shareHandler.getCreateStats(ctx)
-	}()
-	go func() {
-		// Wait for authorize to complete, then immediately challenge the new miner.
-		// No grace period: no inference = no mining.
-		time.Sleep(10 * time.Second)
-		if ctx.Connected() && ctx.WalletAddr != "" {
-			c.sendChallengeToClient(ctx)
-		}
-	}()
+
 }
 
 func (c *clientListener) OnDisconnect(ctx *gostratum.StratumContext) {
-	ctx.Done()
 	c.clientLock.Lock()
 	c.logger.Info("removing client ", ctx.Id)
 	delete(c.clients, ctx.Id)
 	c.logger.Info("removed client ", ctx.Id)
 	c.clientLock.Unlock()
-	RecordDisconnect(ctx)
+	if ctx.IsAuthorized() {
+		RecordDisconnect(ctx)
+	}
 }
 
 func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 	c.clientLock.Lock()
 	addresses := make([]string, 0, len(c.clients))
 	for _, cl := range c.clients {
-		if !cl.Connected() {
+		if !cl.Connected() || !cl.IsAuthorized() {
 			continue
 		}
 		go func(client *gostratum.StratumContext) {
 			state := GetMiningState(client)
+			if !state.dispatchMu.TryLock() {
+				return
+			}
+			defer state.dispatchMu.Unlock()
 			if client.WalletAddr == "" {
 				if time.Since(state.connectTime) > time.Second*20 {
 					client.Logger.Warn("client misconfigured, no miner address specified - disconnecting", zap.String("client", client.String()))
@@ -118,15 +107,12 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				}
 				return
 			}
-			// OPoI gate (Rule #1 — no inference = no mining): withhold all work until the
-			// miner has passed its first capability challenge, and pause job dispatch while
-			// a challenge is in flight. The latter also frees the GPU so the challenge
-			// inference runs uncontended instead of fighting kHeavyHash for the device.
+			// Declarations admit jobs; only full PoM verification admits a share.
 			state.challengeLock.Lock()
-			gated := !state.verified || state.activeChallengeNonce != "" ||
+			gated := !state.capabilitiesReady ||
 				(c.minHoldingSompi > 0 && !state.holdsEnough)
 			state.challengeLock.Unlock()
-			if gated {
+			if gated || !c.shareHandler.canMine() {
 				return
 			}
 			template, err := kapi.GetBlockTemplate(client)
@@ -143,9 +129,14 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}
 
 			// Update escrow store's DAA view and check for incoming AiChallenge TXs.
-			c.escrowStore.UpdateDAA(uint64(template.Block.Header.DAAScore))
-			for _, rh := range scanBlockForAiChallengeResponseHashes(template.Block) {
-				c.escrowStore.MarkSlashedByResponse(rh)
+			if c.escrowStore != nil {
+				c.escrowStore.UpdateDAA(uint64(template.Block.Header.DAAScore))
+				for _, rh := range scanBlockForAiChallengeResponseHashes(template.Block) {
+					c.escrowStore.MarkSlashedByResponse(rh)
+				}
+			}
+			if !template.IsSynced && !kapi.mineWhenNotSynced {
+				return
 			}
 			state.bigDiff = CalculateTarget(uint64(template.Block.Header.Bits))
 			header, err := SerializeBlockHeader(template.Block)
@@ -156,9 +147,12 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}
 
 			jobId := state.AddJob(&BlockJob{App: template.Block, Wire: template.Wire})
-			if !state.initialized {
-				state.initialized = true
-				state.useBigJob = bigJobRegex.MatchString(client.RemoteApp)
+			state.JobLock.Lock()
+			initialized := state.initialized
+			state.JobLock.Unlock()
+			if !initialized {
+				state.JobLock.Lock()
+				state.useBigJob = false // authenticated H15/H16 clients negotiated Stratum v3
 				state.stratumDiff = newKeryxDiff()
 				state.stratumDiff.setDiffValue(c.minShareDiff)
 				if err := client.Send(gostratum.JsonRpcEvent{
@@ -166,10 +160,13 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 					Method:  "mining.set_difficulty",
 					Params:  []any{state.stratumDiff.diffValue},
 				}); err != nil {
+					state.JobLock.Unlock()
 					RecordWorkerError(client.WalletAddr, ErrFailedSetDiff)
 					client.Logger.Error(errors.Wrap(err, "failed sending difficulty").Error(), zap.Any("context", client))
 					return
 				}
+				state.initialized = true
+				state.JobLock.Unlock()
 			}
 
 			jobParams := []any{fmt.Sprintf("%d", jobId)}
@@ -206,14 +203,8 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 				}
 			}
 
-			// If the block template carries a pending AiRequest, dispatch it only to miners
-			// that have declared the required model via mining.declare_capabilities.
-			if task := scanBlockForAiTask(template.Block); task != nil && !blockTaskActive(uint64(template.Block.Header.DAAScore)) {
-				if taskJSON := aiTaskJSON(task); taskJSON != "" && !state.useBigJob && state.HasDeclaredModel(task.ModelIDHex) {
-					// DAA already appended above; add only the task JSON → MiningNotifyWithTask (5 params).
-					jobParams = append(jobParams, taskJSON)
-				}
-			}
+			// Private inference is dispatched only by the authenticated service relay,
+			// after the node confirms the obligation. Never append a legacy task here.
 
 			if err := client.Send(gostratum.JsonRpcEvent{
 				Version: "2.0",
@@ -232,7 +223,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			RecordNewJob(client)
 		}(cl)
 
-		if cl.WalletAddr != "" {
+		if cl.IsAuthorized() {
 			addresses = append(addresses, cl.WalletAddr)
 		}
 	}
@@ -258,7 +249,7 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 					}
 					c.clientLock.RLock()
 					for _, cl := range c.clients {
-						if cl.WalletAddr == "" {
+						if !cl.IsAuthorized() {
 							continue
 						}
 						ok := bal[cl.WalletAddr] >= c.minHoldingSompi
@@ -277,94 +268,4 @@ func (c *clientListener) NewBlockAvailable(kapi *KeryxApi) {
 			}()
 		}
 	}
-}
-
-const opOIChallengeInterval = 60 * time.Minute
-const opOIChallengeDeadline = 5 * time.Minute
-
-// startChallengeLoop periodically sends OPoI capability challenges to all connected miners.
-// The challenge model is picked randomly from those declared by the miner via
-// mining.declare_capabilities. Miners with no declared models are disconnected immediately.
-func (c *clientListener) startChallengeLoop(ctx context.Context) {
-	ticker := time.NewTicker(opOIChallengeInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.sendChallenges()
-		}
-	}
-}
-
-func (c *clientListener) sendChallenges() {
-	c.clientLock.RLock()
-	defer c.clientLock.RUnlock()
-	for _, client := range c.clients {
-		if !client.Connected() || client.WalletAddr == "" {
-			continue
-		}
-		go c.sendChallengeToClient(client)
-	}
-}
-
-func (c *clientListener) sendChallengeToClient(ctx *gostratum.StratumContext) {
-	state := GetMiningState(ctx)
-
-	state.challengeLock.Lock()
-	if state.activeChallengeNonce != "" {
-		// A challenge is already in flight; the deadline timer will kick if unanswered.
-		state.challengeLock.Unlock()
-		return
-	}
-	// No declared models = no provable inference capability = no mining.
-	if len(state.declaredModels) == 0 {
-		state.challengeLock.Unlock()
-		ctx.Logger.Warn("OPoI: no models declared — no inference = no mining, disconnecting",
-			zap.String("miner", ctx.WalletAddr))
-		ctx.Disconnect()
-		return
-	}
-	// Challenge with a random model from those declared — proves the miner has what it claims.
-	var pick [8]byte
-	rand.Read(pick[:]) //nolint:errcheck
-	idx := binary.LittleEndian.Uint64(pick[:]) % uint64(len(state.declaredModels))
-	modelID := state.declaredModels[idx]
-	nonce := make([]byte, 8)
-	rand.Read(nonce) //nolint:errcheck — crypto/rand.Read never returns an error
-	nonceHex := hex.EncodeToString(nonce)
-	state.activeChallengeNonce = nonceHex
-	state.activeChallengeModel = modelID
-	state.challengeIssuedAt = time.Now()
-	state.challengePassed = false
-	state.challengeLock.Unlock()
-
-	ctx.Logger.Info("OPoI challenge: sending to pool miner",
-		zap.String("model", modelID[:8]),
-		zap.String("nonce", nonceHex),
-		zap.String("miner", ctx.WalletAddr))
-
-	if err := ctx.Send(gostratum.JsonRpcEvent{
-		Version: "2.0",
-		Method:  "mining.challenge",
-		Params:  []any{modelID, nonceHex},
-	}); err != nil {
-		ctx.Logger.Warn("OPoI challenge: failed to send to miner", zap.Error(err))
-		return
-	}
-
-	// Deadline timer: kick if no response within the deadline window.
-	go func() {
-		time.Sleep(opOIChallengeDeadline)
-		state.challengeLock.Lock()
-		unanswered := state.activeChallengeNonce == nonceHex
-		state.challengeLock.Unlock()
-		if unanswered {
-			ctx.Logger.Warn("OPoI challenge: deadline exceeded — no inference = no mining, disconnecting",
-				zap.String("nonce", nonceHex),
-				zap.String("miner", ctx.WalletAddr))
-			ctx.Disconnect()
-		}
-	}()
 }

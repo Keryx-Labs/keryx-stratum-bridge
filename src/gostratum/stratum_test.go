@@ -3,6 +3,7 @@ package gostratum
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -25,11 +26,15 @@ func testLogger() *zap.Logger {
 func TestAcceptContextLifetime(t *testing.T) {
 	logger := testLogger()
 
-	listener := NewListener(DefaultConfig(logger))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	cfg := DefaultConfig(logger)
+	cfg.Port = "127.0.0.1:0"
+	listener := NewListener(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 
 	defer cancel()
-	listener.Listen(ctx)
+	if err := listener.Listen(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("listener did not stop on cancellation: %v", err)
+	}
 }
 
 func TestNewClient(t *testing.T) {
@@ -39,10 +44,12 @@ func TestNewClient(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	mc := NewMockConnection()
+	t.Cleanup(func() { mc.Close() })
+	listener.connectionSlots <- struct{}{}
 	listener.newClient(ctx, mc)
 	// send in the authorize event
 	event, _ := json.Marshal(NewEvent("1", "mining.authorize", []any{
-		"", "test",
+		"keryx:qqayxgcjfh6d7uxpj4w3qzjvx73vdehfx22fl6cacmn44rpj5geg2rxyuhga4.rig01", "test",
 	}))
 	mc.AsyncWriteTestDataToReadBuffer(string(event) + "\n")
 
@@ -76,15 +83,15 @@ func TestWalletValidation(t *testing.T) {
 		shouldErr bool
 	}{
 		{
-			in:       "keryx:qqayxgcjfh6d7uxpj4w3qzjvx73vdehfx22fl6cacmn44rpj5geg2rxyuhga4,Rig_3784816",
+			in:       "keryx:qqayxgcjfh6d7uxpj4w3qzjvx73vdehfx22fl6cacmn44rpj5geg2rxyuhga4",
 			expected: "keryx:qqayxgcjfh6d7uxpj4w3qzjvx73vdehfx22fl6cacmn44rpj5geg2rxyuhga4",
 		},
 		{
-			in:       "keryx:qqkrl0er5ka5snd55gr9rcf6rlpx8nln8gf3jxf83w4dc0khfqmauy6qs83zm,Rig_3784816",
+			in:       "keryx:qqkrl0er5ka5snd55gr9rcf6rlpx8nln8gf3jxf83w4dc0khfqmauy6qs83zm",
 			expected: "keryx:qqkrl0er5ka5snd55gr9rcf6rlpx8nln8gf3jxf83w4dc0khfqmauy6qs83zm",
 		},
 		{
-			in:       "qqkrl0er5ka5snd55gr9rcf6rlpx8nln8gf3jxf83w4dc0khfqmauy6qs83zm,Rig_3784816",
+			in:       "qqkrl0er5ka5snd55gr9rcf6rlpx8nln8gf3jxf83w4dc0khfqmauy6qs83zm",
 			expected: "keryx:qqkrl0er5ka5snd55gr9rcf6rlpx8nln8gf3jxf83w4dc0khfqmauy6qs83zm",
 		},
 	}

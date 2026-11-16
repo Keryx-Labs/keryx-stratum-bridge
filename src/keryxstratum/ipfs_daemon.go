@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -83,7 +82,7 @@ func ensureIPFSDaemon(logger *zap.SugaredLogger, apiURL, configuredBinary string
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// Own process group: Ctrl+C on the bridge must not kill kubo mid-write.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	hideVerifierWindow(cmd)
 	if err := cmd.Start(); err != nil {
 		logger.Error("failed starting ipfs daemon: " + err.Error())
 		logFile.Close()

@@ -1,0 +1,9 @@
+.git
+work
+bin
+**/target
+**/*.key
+**/*.pem
+**/escrow_state.json
+**/service-state.json*
+**/worker-tokens.json

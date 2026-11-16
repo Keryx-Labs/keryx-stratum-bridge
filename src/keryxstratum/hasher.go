@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"log"
+	"math"
 	"math/big"
 
 	"github.com/kaspanet/kaspad/app/appmessage"
@@ -16,7 +17,7 @@ import (
 
 // static value definitions to avoid overhead in diff translations
 var (
-	maxTarget = big.NewFloat(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+	maxTarget = new(big.Float).SetInt(new(big.Int).Lsh(big.NewInt(0xffff), 208))
 	minHash   = new(big.Float).Quo(new(big.Float).SetMantExp(big.NewFloat(1), 256), maxTarget)
 	bigGig    = big.NewFloat(1e9)
 )
@@ -41,10 +42,23 @@ func (k *keryxDiff) setDiffValue(diff float64) {
 }
 
 func DiffToTarget(diff float64) *big.Int {
-	target := new(big.Float).Quo(maxTarget, big.NewFloat(diff))
-
-	t, _ := target.Int(nil)
-	return t
+	// Match official miner protocol::difficulty_to_target, including f32 reciprocal
+	// rounding. The difficulty-one target is 0xffff << 208, not 2^224 - 1.
+	inverse := float32(1) / float32(diff)
+	if inverse <= 0 || math.IsInf(float64(inverse), 0) || math.IsNaN(float64(inverse)) {
+		return new(big.Int)
+	}
+	bits := math.Float32bits(inverse)
+	exponent := int((bits>>23)&0xff) - 127 - 23 + 208
+	mantissa := uint64((bits & 0x7fffff) | 0x800000)
+	if (bits>>23)&0xff == 0 {
+		mantissa = uint64(bits&0x7fffff) << 1
+	}
+	mantissa *= 0xffff
+	if exponent < 0 {
+		return new(big.Int)
+	}
+	return new(big.Int).Lsh(new(big.Int).SetUint64(mantissa), uint(exponent))
 }
 
 func DiffToHash(diff float64) float64 {

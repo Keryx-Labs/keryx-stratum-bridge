@@ -2,63 +2,70 @@ package main
 
 import (
 	"flag"
-	"io/ioutil"
-	"log"
-	"os"
-	"path"
-	"time"
-
 	"github.com/keryx-labs/keryx-stratum-bridge/src/keryxstratum"
 	"gopkg.in/yaml.v2"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
 )
 
 func main() {
-	pwd, _ := os.Getwd()
-	fullPath := path.Join(pwd, "config.yaml")
-	log.Printf("loading config @ `%s`", fullPath)
-	rawCfg, err := ioutil.ReadFile(fullPath)
-	if err != nil {
-		log.Printf("config file not found: %s", err)
-		os.Exit(1)
-	}
-	cfg := keryxstratum.BridgeConfig{}
-	if err := yaml.Unmarshal(rawCfg, &cfg); err != nil {
-		log.Printf("failed parsing config file: %s", err)
-		os.Exit(1)
-	}
-
-	flag.StringVar(&cfg.StratumPort, "stratum", cfg.StratumPort, "stratum port to listen on, default `:5555`")
-	flag.BoolVar(&cfg.PrintStats, "stats", cfg.PrintStats, "true to show periodic stats to console, default `true`")
-	flag.StringVar(&cfg.RPCServer, "keryxd", cfg.RPCServer, "address of the keryxd node, default `localhost:22110`")
-	flag.DurationVar(&cfg.BlockWaitTime, "blockwait", cfg.BlockWaitTime, "time in ms to wait before manually requesting new block, default `500`")
-	flag.UintVar(&cfg.MinShareDiff, "mindiff", cfg.MinShareDiff, "minimum share difficulty to accept from miner(s), default `4`")
-	flag.UintVar(&cfg.ExtranonceSize, "extranonce", cfg.ExtranonceSize, "size in bytes of extranonce, default `0`")
-	flag.StringVar(&cfg.PromPort, "prom", cfg.PromPort, "address to serve prom stats, default `:2112`")
-	flag.BoolVar(&cfg.UseLogFile, "log", cfg.UseLogFile, "if true will output errors to log file, default `true`")
-	flag.StringVar(&cfg.HealthCheckPort, "hcp", cfg.HealthCheckPort, `(rarely used) if defined will expose a health check on /readyz, default ""`)
+	configPath := flag.String("config", "config.yaml", "configuration file")
+	stratum := flag.String("stratum", "", "Stratum listen address")
+	node := flag.String("keryxd", "", "local node RPC address")
+	prom := flag.String("prom", "", "loopback metrics address")
+	health := flag.String("hcp", "", "loopback health/status address")
+	stats := flag.Bool("stats", true, "print worker and escrow service standing")
+	logfile := flag.Bool("log", false, "append logs to bridge.log")
+	blockwait := flag.Duration("blockwait", 500*time.Millisecond, "minimum template refresh interval")
+	mindiff := flag.Uint("mindiff", 4, "share difficulty")
+	extranonce := flag.Uint("extranonce", 0, "extranonce size in bytes")
 	flag.Parse()
-
-	if cfg.MinShareDiff == 0 {
-		cfg.MinShareDiff = 4
+	absolute, err := filepath.Abs(*configPath)
+	if err != nil {
+		log.Fatal("invalid config path")
 	}
-	if cfg.BlockWaitTime == 0 {
-		cfg.BlockWaitTime = 5 * time.Second
+	raw, err := os.ReadFile(absolute)
+	if err != nil {
+		log.Fatal("cannot read config file")
 	}
-
-	log.Println("----------------------------------")
-	log.Printf("initializing keryx stratum bridge")
-	log.Printf("\tkeryxd:          %s", cfg.RPCServer)
-	log.Printf("\tstratum:         %s", cfg.StratumPort)
-	log.Printf("\tprom:            %s", cfg.PromPort)
-	log.Printf("\tstats:           %t", cfg.PrintStats)
-	log.Printf("\tlog:             %t", cfg.UseLogFile)
-	log.Printf("\tmin diff:        %d", cfg.MinShareDiff)
-	log.Printf("\tblock wait:      %s", cfg.BlockWaitTime)
-	log.Printf("\textranonce size: %d", cfg.ExtranonceSize)
-	log.Printf("\thealth check:    %s", cfg.HealthCheckPort)
-	log.Println("----------------------------------")
-
-	if err := keryxstratum.ListenAndServe(cfg); err != nil {
-		log.Println(err)
+	cfg := keryxstratum.BridgeConfig{Network: "mainnet", StratumPort: "127.0.0.1:5555", RPCServer: "127.0.0.1:22110", BlockWaitTime: 500 * time.Millisecond, MinShareDiff: 4, MaxConnections: 128}
+	if err = yaml.UnmarshalStrict(raw, &cfg); err != nil {
+		log.Fatalf("invalid configuration: %s", err)
+	}
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "stratum":
+			cfg.StratumPort = *stratum
+		case "keryxd":
+			cfg.RPCServer = *node
+		case "prom":
+			cfg.PromPort = *prom
+		case "hcp":
+			cfg.HealthCheckPort = *health
+		case "stats":
+			cfg.PrintStats = *stats
+		case "log":
+			cfg.UseLogFile = *logfile
+		case "blockwait":
+			cfg.BlockWaitTime = *blockwait
+		case "mindiff":
+			cfg.MinShareDiff = *mindiff
+		case "extranonce":
+			cfg.ExtranonceSize = *extranonce
+		}
+	})
+	base := filepath.Dir(absolute)
+	for _, path := range []*string{&cfg.EscrowKeyFile, &cfg.WorkerAuthFile, &cfg.VerifierBinary, &cfg.ServiceStateFile, &cfg.TLSCertFile, &cfg.TLSKeyFile} {
+		if *path != "" && !filepath.IsAbs(*path) {
+			*path = filepath.Join(base, *path)
+		}
+	}
+	if cfg.ServiceStateFile == "" {
+		cfg.ServiceStateFile = filepath.Join(base, "service-state.json")
+	}
+	if err = keryxstratum.ListenAndServe(cfg); err != nil {
+		log.Fatal(err)
 	}
 }

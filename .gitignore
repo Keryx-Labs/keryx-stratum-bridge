@@ -32,3 +32,13 @@ release/
 # Bridge local runtime logs — never commit
 cmd/keryxbridge/bridge.log
 cmd/keryxbridge/kubo.log
+
+# Private runtime material and local build/reference files
+*.key
+*.pem
+escrow_state.json
+service-state.json*
+worker-tokens.json
+/work/
+/bin/
+/verifier/target/
